@@ -1,0 +1,33 @@
+#include <ESP8266WiFi.h>
+#include <espnow.h>
+
+typedef struct struct_message {
+  uint8_t msgType;
+  uint8_t macAddr[6];
+  unsigned int Right_Score, Left_Score, Seconds_Remaining, Minutes_Remaining;
+  bool Green_Light, Red_Light, White_Green_Light, White_Red_Light, Yellow_Green_Light, Yellow_Red_Light;
+  bool Yellow_Card_Green, Yellow_Card_Red, Red_Card_Green, Red_Card_Red, Priority_Left, Priority_Right;
+  char customMessage[32];
+} struct_message;
+
+struct_message incoming;
+
+void OnDataRecv(uint8_t* mac, uint8_t* incomingData, uint8_t len) {
+  memcpy(&incoming, incomingData, sizeof(incoming));
+  Serial.print("PING RECEIVED! From: ");
+  Serial.print(incoming.customMessage);
+  Serial.print(" | Red Light State: ");
+  Serial.println(incoming.Red_Light ? "ON" : "OFF");
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  if (esp_now_init() != 0) return;
+  esp_now_set_self_role(ESP_NOW_ROLE_SLAVE);
+  esp_now_register_recv_cb(OnDataRecv);
+  Serial.println("Receiver Online. Waiting for ping...");
+}
+
+void loop() { delay(1); }
