@@ -1,0 +1,24 @@
+#include <ESP8266WiFi.h>
+
+void setup() {
+  // Initialize Serial at a high speed for the monitor
+  Serial.begin(115200);
+  delay(1000);
+
+  // Set WiFi to Station mode (required to read the MAC) [cite: 20]
+  WiFi.mode(WIFI_STA);
+  
+  Serial.println("");
+  Serial.println("------------------------------------------");
+  Serial.print("Wemos Receiver MAC Address: ");
+  
+  // Retrieve and print the MAC address [cite: 20, 21]
+  Serial.println(WiFi.macAddress());
+  Serial.println("------------------------------------------");
+  Serial.println("Copy the address above into your Transmitter's");
+  Serial.println("receiverAddress[] array.");
+}
+
+void loop() {
+  // Nothing to do here
+}
