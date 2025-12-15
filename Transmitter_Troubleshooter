@@ -1,0 +1,39 @@
+#include <ESP8266WiFi.h>
+#include <espnow.h>
+
+// REPLACE with your Receiver's MAC address
+uint8_t receiverAddress[] = {0x12, 0x34, 0x56, 0x78, 0x90, 0xAB}; 
+
+typedef struct struct_message {
+  uint8_t msgType;
+  uint8_t macAddr[6];
+  unsigned int Right_Score, Left_Score, Seconds_Remaining, Minutes_Remaining;
+  bool Green_Light, Red_Light, White_Green_Light, White_Red_Light, Yellow_Green_Light, Yellow_Red_Light;
+  bool Yellow_Card_Green, Yellow_Card_Red, Red_Card_Green, Red_Card_Red, Priority_Left, Priority_Right;
+  char customMessage[32];
+} struct_message;
+
+struct_message testData;
+
+void OnDataSent(uint8_t *mac_addr, uint8_t sendStatus) {
+  Serial.print("Status: ");
+  [cite_start]// sendStatus == 0 means the Receiver physically acknowledged the packet [cite: 56-57]
+  if (sendStatus == 0) Serial.println("ACK Received (Success)");
+  else Serial.println("NO ACK (Check Receiver Power/MAC Address)");
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != 0) return;
+  esp_now_set_self_role(ESP_NOW_ROLE_CONTROLLER);
+  esp_now_register_send_cb(OnDataSent);
+  esp_now_add_peer(receiverAddress, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
+  strcpy(testData.customMessage, "Troubleshoot");
+}
+
+void loop() {
+  testData.Red_Light = !testData.Red_Light; // Toggle Red Light to show change
+  esp_now_send(receiverAddress, (uint8_t *)&testData, sizeof(testData));
+  delay(2000);
+}
