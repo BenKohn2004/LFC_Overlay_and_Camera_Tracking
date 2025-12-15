@@ -1,3 +1,51 @@
-🤺 Favero 05 to OBS Wireless BridgeA low-latency, wireless automation system that connects a Favero 05 Full Arm fencing machine to OBS Studio. Using two Wemos D1 Mini (ESP8266) modules and ESP-NOW, this system triggers broadcast-style overlays the millisecond a hit is detected.⚡ Quick Start ChecklistBefore running the system, ensure these non-obvious configurations are complete:[ ] MAC Address: Copy the Receiver's MAC address into the receiverAddress[] array in the Transmitter code1.[ ] COM Port: Identify the Receiver's COM port in Device Manager and update COM_PORT in Favero_OBS_Bridge.py.[ ] OBS Auth: Enable WebSocket authentication in OBS and copy the password into the Python script.[ ] Naming: Ensure your OBS Scene is named Main and your sources are Red_Light, Green_Light, White_Red_Light, and White_Green_Light 22.+1[ ] Serial Lock: Close the Arduino Serial Monitor before starting the Python script.🛠 Hardware ArchitectureComponentRoleConnectionTransmitterParses Favero data & broadcasts via ESP-NOWFavero Serial $\rightarrow$ RS232-TTL $\rightarrow$ Wemos RX 3333+2ReceiverListens for ESP-NOW & bridges to USBWemos USB $\rightarrow$ Laptop COM Port 44+1LaptopRuns Python Bridge & OBS StudioInterprets Serial DATA, strings 5🚀 Installation & Setup1. Firmware UploadTransmitter: Upload 8266_Parser_and_Transmitter_Unified.ino.Note: Ensure the baud rate is set to 2400 to match the Favero output66.+1Receiver: Upload 8266_Receiver_Laptop_Bridge.ino.Note: This runs at 115200 baud for the laptop link77.+12. OBS ConfigurationNavigate to Tools → obs-websocket Settings.Enable the server and note your password (default port is 4455).In your "Main" scene, create four sources (Image or Color) with these exact names:Red_LightGreen_LightWhite_Red_LightWhite_Green_Light 83. Python EnvironmentInstall the required dependencies via terminal:Bashpip install pyserial obs-websocket-py
-💻 Running the BridgePlug the Receiver into the laptop.Launch OBS Studio.Execute the bridge script:Bashpython Favero_OBS_Bridge.py
-📝 Data ProtocolThe Receiver sends data to the laptop in a CSV format for high-speed parsing:DATA,Red,Green,WhiteRed,WhiteGreen,LeftScore,RightScore,Min,Sec 9⚠️ TroubleshootingLights Inverted? Swap the names of your sources in OBS or adjust the SOURCE_MAP in the Python script 10.No Connection? Check the Baud Rate. The Transmitter talks to the Favero at 2400, but the Receiver talks to the laptop at 11520011111111.+1Laggy Clock? Ensure TEST_MODE is false in the Transmitter to stop simulated data from flooding the stream.
+# 🤺 Favero 05 to OBS Wireless Bridge
+
+A low-latency, wireless automation system that connects a **Favero 05 Full Arm** fencing machine to **OBS Studio**. Using two Wemos D1 Mini (ESP8266) modules and ESP-NOW, this system triggers broadcast-style overlays the millisecond a hit is detected.
+
+---
+
+## ⚡ Quick Start Checklist
+
+Before running the system, ensure these non-obvious configurations are complete:
+
+- [ ] **MAC Address:** Copy the Receiver's MAC address into the `receiverAddress[]` array in the Transmitter code.
+- [ ] **COM Port:** Identify the Receiver's COM port in Device Manager and update `COM_PORT` in `Favero_OBS_Bridge.py`.
+- [ ] **OBS Auth:** Enable WebSocket authentication in OBS and copy the password into the Python script.
+- [ ] [cite_start]**Naming:** Ensure your OBS Scene is named `Main` and your sources are `Red_Light`, `Green_Light`, `White_Red_Light`, and `White_Green_Light` [cite: 91, 101-104].
+- [ ] **Serial Lock:** Close the Arduino Serial Monitor before starting the Python script.
+
+---
+
+## 🛠 Hardware Architecture
+
+| Component | Role | Connection |
+| :--- | :--- | :--- |
+| **Transmitter** | Parses Favero data & broadcasts via ESP-NOW | Favero Serial → RS232-TTL → Wemos RX |
+| **Receiver** | Listens for ESP-NOW & bridges to USB | Wemos USB → Laptop COM Port |
+| **Laptop** | Runs Python Bridge & OBS Studio | [cite_start]Interprets Serial `DATA,` strings  |
+
+
+
+---
+
+## 🚀 Installation & Setup
+
+### 1. Firmware Upload
+1.  **Transmitter:** Upload `8266_Parser_and_Transmitter_Unified.ino`.
+    * [cite_start]*Note:* The baud rate is set to `2400` to match the Favero output.
+2.  **Receiver:** Upload `8266_Receiver_Laptop_Bridge.ino`.
+    * [cite_start]*Note:* This runs at `115200` baud for the laptop link.
+
+### 2. OBS Configuration
+1.  Navigate to `Tools` → `obs-websocket Settings`.
+2.  Enable the server and note your password (default port is `4455`).
+3.  In your **"Main"** scene, create four sources (Image or Color) with these exact names:
+    * `Red_Light`
+    * `Green_Light`
+    * `White_Red_Light`
+    * `White_Green_Light`
+
+### 3. Python Environment
+Install the required dependencies via terminal:
+```bash
+pip install pyserial obs-websocket-py
