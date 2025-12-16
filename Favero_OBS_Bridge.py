@@ -3,30 +3,38 @@ import time
 from obswebsocket import obsws, requests
 
 # --- Configuration ---
-COM_PORT = 'COM3'         
-BAUD_RATE = 115200
+COM_PORT = 'COM3'         # Update to your Receiver's COM port
+BAUD_RATE = 115200        # Must match Receiver [cite: 143]
 OBS_HOST = "localhost"
 OBS_PORT = 4455
-OBS_PASS = "your_password" 
-SCENE_NAME = "Main"
+OBS_PASS = "your_password" # Set in OBS Tools -> WebSocket Settings
+SCENE_NAME = "Main"       # Must match your OBS Scene name
 
-# Mapping CSV indices for visibility toggle (Lights and Cards) [cite: 111, 122]
+# Mapping CSV indices from Receiver DATA string to OBS Source Names 
+# Index: 1=Red, 2=Green, 3=WhiteRed, 4=WhiteGreen
+# Index: 9=Y_Red_Card, 10=Y_Green_Card, 11=R_Red_Card, 12=R_Green_Card
+# Index: 13=Prio_Left, 14=Prio_Right
 VISIBILITY_MAP = {
     1: "Red_Light",
     2: "Green_Light",
     3: "White_Red_Light",
     4: "White_Green_Light",
-    # Note: These indices depend on your Receiver's Serial.print order
-    # If you update the Receiver to send card data, add indices 9, 10, 11, 12 here.
+    9: "Yellow_Card_Red",
+    10: "Yellow_Card_Green",
+    11: "Red_Card_Red",
+    12: "Red_Card_Green",
+    13: "Priority_Left",
+    14: "Priority_Right"
 }
 
 def connect_obs():
     client = obsws(OBS_HOST, OBS_PORT, OBS_PASS)
     try:
         client.connect()
+        print(f"Successfully connected to OBS. Monitoring scene: {SCENE_NAME}")
         return client
     except Exception as e:
-        print(f"Connection Error: {e}")
+        print(f"OBS Connection Error: {e}")
         return None
 
 def main():
@@ -35,65 +43,71 @@ def main():
 
     try:
         ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
-        print(f"Bridge Active on {COM_PORT}...")
+        print(f"Listening for Favero data on {COM_PORT}...")
     except Exception as e:
         print(f"Serial Error: {e}")
         return
 
-    # Track states to minimize WebSocket traffic
-    last_states = {}
+    # Tracking states to minimize network traffic
+    last_visibility = {name: None for name in VISIBILITY_MAP.values()}
     last_score_l = ""
     last_score_r = ""
     last_clock = ""
 
     try:
         while True:
-            line = ser.readline().decode('utf-8').strip()
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
             
             if line.startswith("DATA,"):
                 parts = line.split(",")
                 
-                # 1. Update Visibility (Lights) 
-                for i in range(1, 5):
-                    is_active = (parts[i] == "1")
-                    source_name = VISIBILITY_MAP[i]
-                    if is_active != last_states.get(source_name):
-                        item_id = get_item_id(obs, SCENE_NAME, source_name)
-                        if item_id:
-                            obs.call(requests.SetSceneItemEnabled(
-                                sceneName=SCENE_NAME, sceneItemId=item_id, sceneItemEnabled=is_active
-                            ))
-                            last_states[source_name] = is_active
+                # 1. Update Visibility Items (Lights, Cards, Priority) 
+                for idx, source_name in VISIBILITY_MAP.items():
+                    if idx < len(parts):
+                        is_active = (parts[idx] == "1")
+                        if is_active != last_visibility[source_name]:
+                            item_id = get_item_id(obs, SCENE_NAME, source_name)
+                            if item_id is not None:
+                                obs.call(requests.SetSceneItemEnabled(
+                                    sceneName=SCENE_NAME,
+                                    sceneItemId=item_id,
+                                    sceneItemEnabled=is_active
+                                ))
+                                last_visibility[source_name] = is_active
 
-                # 2. Update Scores [cite: 111, 135, 136]
-                score_l, score_r = parts[5], parts[6]
-                if score_l != last_score_l:
-                    obs.call(requests.SetInputSettings(inputName="Left_Score_Text", inputSettings={"text": score_l}))
-                    last_score_l = score_l
-                if score_r != last_score_r:
-                    obs.call(requests.SetInputSettings(inputName="Right_Score_Text", inputSettings={"text": score_r}))
-                    last_score_r = score_r
+                # 2. Update Scores 
+                if len(parts) > 6:
+                    score_l, score_r = parts[5], parts[6]
+                    if score_l != last_score_l:
+                        obs.call(requests.SetInputSettings(inputName="Left_Score_Text", inputSettings={"text": score_l}))
+                        last_score_l = score_l
+                    if score_r != last_score_r:
+                        obs.call(requests.SetInputSettings(inputName="Right_Score_Text", inputSettings={"text": score_r}))
+                        last_score_r = score_r
 
-                # 3. Update Clock (Format MM:SS) [cite: 111, 136]
-                mins, secs = parts[7], parts[8].zfill(2)
-                current_clock = f"{mins}:{secs}"
-                if current_clock != last_clock:
-                    obs.call(requests.SetInputSettings(inputName="Clock_Text", inputSettings={"text": current_clock}))
-                    last_clock = current_clock
+                # 3. Update Clock (MM:SS) 
+                if len(parts) > 8:
+                    mins, secs = parts[7], parts[8].zfill(2)
+                    current_clock = f"{mins}:{secs}"
+                    if current_clock != last_clock:
+                        obs.call(requests.SetInputSettings(inputName="Clock_Text", inputSettings={"text": current_clock}))
+                        last_clock = current_clock
 
     except KeyboardInterrupt:
-        print("Stopping...")
+        print("\nShutting down bridge...")
     finally:
         ser.close()
         obs.disconnect()
 
 def get_item_id(client, scene_name, source_name):
+    """Helper to find the internal OBS SceneItemID"""
     try:
         response = client.call(requests.GetSceneItemList(sceneName=scene_name))
         for item in response.getSceneItems():
             if item['sourceName'] == source_name:
                 return item['sceneItemId']
-    except: return None
+    except:
+        return None
     return None
 
 if __name__ == "__main__":
