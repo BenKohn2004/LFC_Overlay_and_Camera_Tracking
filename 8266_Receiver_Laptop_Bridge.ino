@@ -2,7 +2,7 @@
 #include <espnow.h>
 
 // Configuration
-const char* STRIP_NAME = "Strip 1"; 
+const char* STRIP_NAME = "Strip 10"; 
 bool verbose = false;
 
 // Structure must match Transmitter exactly [cite: 107, 120-122]
