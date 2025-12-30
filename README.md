@@ -1,6 +1,8 @@
 # 🤺 Favero 05 to OBS Wireless Bridge
 
-A low-latency, wireless automation system that connects a **Favero 05 Full Arm** fencing machine to **OBS Studio**. Using two Wemos D1 Mini (ESP8266) modules and ESP-NOW, this system triggers broadcast-style overlays the millisecond a hit is detected.
+A low-latency, wireless automation system that connects a **Favero 05 Full Arm** fencing machine to **OBS Studio**. Using two Wemos D1 Mini (ESP8266) modules and ESP-NOW, this system triggers broadcast-style overlays after a hit is detected.
+
+The overlay works with a servo and two optical rotatory encoders built into modified Favero Reels as detailed in [Reel Camera Tracker](https://github.com/BenKohn2004/Reel_Camera_Tracker).
 
 ---
 
