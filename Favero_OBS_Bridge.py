@@ -7,7 +7,7 @@ COM_PORT = 'COM3'         # Update to your Receiver's COM port
 BAUD_RATE = 115200        # Must match Receiver [cite: 143]
 OBS_HOST = "localhost"
 OBS_PORT = 4455
-OBS_PASS = "ilovetofence" # Set in OBS Tools -> WebSocket Settings
+OBS_PASS = "password" # Set in OBS Tools -> WebSocket Settings
 SCENE_NAME = "Main"       # Must match your OBS Scene name
 
 # Mapping CSV indices from Receiver DATA string to OBS Source Names 
