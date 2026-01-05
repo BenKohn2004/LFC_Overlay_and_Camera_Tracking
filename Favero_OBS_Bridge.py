@@ -1,11 +1,11 @@
 import serial
 import time
 from obswebsocket import obsws, requests
+import serial.tools.list_ports
 
 # --- Configuration ---
-COM_PORT = 'COM3'                   # Update to your Receiver's COM port
 BAUD_RATE = 115200                  # Must match Receiver
-OBS_HOST = "localhost"              # Localhost since OBS and Python are on same machine
+OBS_HOST = "localhost"              
 OBS_PORT = 4455
 OBS_PASS = "ql2C52K1fl8RtyZU"      # Updated password
 SCENE_NAME = "Main"                 # Must match your OBS Scene name
@@ -29,6 +29,24 @@ LEFT_SCORE_INPUT = "Left_Score_Text"
 RIGHT_SCORE_INPUT = "Right_Score_Text"
 CLOCK_INPUT = "Clock_Text"
 
+# -----------------------------
+# Automatic COM port detection with multi-device check
+# -----------------------------
+def find_arduino():
+    """Detect connected Arduino/Wemos devices via USB."""
+    ports = list(serial.tools.list_ports.comports())
+    arduino_ports = [p.device for p in ports if any(keyword in p.description for keyword in ["USB", "CH340", "Arduino"])]
+    
+    if len(arduino_ports) == 0:
+        return None, 0
+    elif len(arduino_ports) == 1:
+        return arduino_ports[0], 1
+    else:
+        return arduino_ports, len(arduino_ports)
+
+# -----------------------------
+# Connect to OBS WebSocket
+# -----------------------------
 def connect_obs():
     client = obsws(OBS_HOST, OBS_PORT, OBS_PASS)
     try:
@@ -39,8 +57,10 @@ def connect_obs():
         print(f"❌ OBS Connection Error: {e}")
         return None
 
+# -----------------------------
+# Helper to find OBS scene item ID
+# -----------------------------
 def get_item_id(client, scene_name, source_name):
-    """Helper to find the internal OBS SceneItemID"""
     try:
         response = client.call(requests.GetSceneItemList(sceneName=scene_name))
         for item in response.getSceneItems():
@@ -50,7 +70,23 @@ def get_item_id(client, scene_name, source_name):
         return None
     return None
 
+# -----------------------------
+# Main bridge function
+# -----------------------------
 def main():
+    COM_PORT, count = find_arduino()
+    if count == 0:
+        print("❌ No Arduino/Wemos detected! Connect the device and try again.")
+        return
+    elif count > 1:
+        print("❌ Multiple Arduino/Wemos devices detected! Please remove extra devices.")
+        print("Detected devices:")
+        for port in COM_PORT:
+            print(f"  - {port}")
+        return
+    else:
+        print(f"✅ Arduino/Wemos found on {COM_PORT}")
+
     obs = connect_obs()
     if not obs:
         return
@@ -126,5 +162,6 @@ def main():
         obs.disconnect()
         print("✅ Disconnected cleanly from OBS and serial port.")
 
+# -----------------------------
 if __name__ == "__main__":
     main()
