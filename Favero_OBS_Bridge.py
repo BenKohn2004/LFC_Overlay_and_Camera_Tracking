@@ -23,7 +23,7 @@ RIGHT_NAME_INPUT = "Right Fencer Name"
 LEFT_CLUB_IMAGE = "Left Club"
 RIGHT_CLUB_IMAGE = "Right Club"
 
-CLUB_IMAGE_DIR = r"C:\OBS\Clubs"
+CLUB_IMAGE_DIR = r"C:\Users\Ben\Desktop\OBS Files to Email"
 
 # Mapping CSV indices → OBS sources
 VISIBILITY_MAP = {
