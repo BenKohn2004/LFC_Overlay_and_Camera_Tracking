@@ -1,16 +1,31 @@
 import serial
 import time
+import json
 from obswebsocket import obsws, requests
 import serial.tools.list_ports
+import os
 
 # --- Configuration ---
-BAUD_RATE = 115200                  # Must match Receiver
-OBS_HOST = "localhost"              
+BAUD_RATE = 115200
+OBS_HOST = "localhost"
 OBS_PORT = 4455
-OBS_PASS = "ql2C52K1fl8RtyZU"      # Updated password
-SCENE_NAME = "Main"                 # Must match your OBS Scene name
+OBS_PASS = "ql2C52K1fl8RtyZU"
+SCENE_NAME = "Main"
 
-# Mapping CSV indices from Receiver DATA string to OBS Source Names
+# OBS Text Sources
+LEFT_SCORE_INPUT = "Left_Score_Text"
+RIGHT_SCORE_INPUT = "Right_Score_Text"
+CLOCK_INPUT = "Clock_Text"
+
+LEFT_NAME_INPUT = "Left Fencer Name"
+RIGHT_NAME_INPUT = "Right Fencer Name"
+
+LEFT_CLUB_IMAGE = "Left Club"
+RIGHT_CLUB_IMAGE = "Right Club"
+
+CLUB_IMAGE_DIR = r"C:\OBS\Clubs"
+
+# Mapping CSV indices → OBS sources
 VISIBILITY_MAP = {
     1: "Red_Light",
     2: "Green_Light",
@@ -24,143 +39,127 @@ VISIBILITY_MAP = {
     14: "Priority_Right"
 }
 
-# Score and clock inputs
-LEFT_SCORE_INPUT = "Left_Score_Text"
-RIGHT_SCORE_INPUT = "Right_Score_Text"
-CLOCK_INPUT = "Clock_Text"
-
-# -----------------------------
-# Automatic COM port detection with multi-device check
 # -----------------------------
 def find_arduino():
-    """Detect connected Arduino/Wemos devices via USB."""
     ports = list(serial.tools.list_ports.comports())
-    arduino_ports = [p.device for p in ports if any(keyword in p.description for keyword in ["USB", "CH340", "Arduino"])]
-    
-    if len(arduino_ports) == 0:
-        return None, 0
-    elif len(arduino_ports) == 1:
-        return arduino_ports[0], 1
-    else:
-        return arduino_ports, len(arduino_ports)
+    devices = [p.device for p in ports if any(k in p.description for k in ["USB", "CH340", "Arduino"])]
+    return (devices[0], 1) if len(devices) == 1 else (devices, len(devices))
 
-# -----------------------------
-# Connect to OBS WebSocket
 # -----------------------------
 def connect_obs():
     client = obsws(OBS_HOST, OBS_PORT, OBS_PASS)
-    try:
-        client.connect()
-        print(f"✅ Connected to OBS WebSocket. Monitoring scene: {SCENE_NAME}")
-        return client
-    except Exception as e:
-        print(f"❌ OBS Connection Error: {e}")
-        return None
+    client.connect()
+    print(f"✅ Connected to OBS WebSocket ({SCENE_NAME})")
+    return client
 
 # -----------------------------
-# Helper to find OBS scene item ID
-# -----------------------------
-def get_item_id(client, scene_name, source_name):
-    try:
-        response = client.call(requests.GetSceneItemList(sceneName=scene_name))
-        for item in response.getSceneItems():
-            if item['sourceName'] == source_name:
-                return item['sceneItemId']
-    except Exception:
-        return None
+def get_item_id(client, scene, source):
+    resp = client.call(requests.GetSceneItemList(sceneName=scene))
+    for item in resp.getSceneItems():
+        if item['sourceName'] == source:
+            return item['sceneItemId']
     return None
 
 # -----------------------------
-# Main bridge function
+def set_text(obs, source, text):
+    obs.call(requests.SetInputSettings(
+        inputName=source,
+        inputSettings={"text": text},
+        overlay=True
+    ))
+
+def set_image(obs, source, path):
+    obs.call(requests.SetInputSettings(
+        inputName=source,
+        inputSettings={"file": path},
+        overlay=True
+    ))
+
 # -----------------------------
 def main():
     COM_PORT, count = find_arduino()
-    if count == 0:
-        print("❌ No Arduino/Wemos detected! Connect the device and try again.")
+    if count != 1:
+        print("❌ Arduino/Wemos not uniquely detected")
         return
-    elif count > 1:
-        print("❌ Multiple Arduino/Wemos devices detected! Please remove extra devices.")
-        print("Detected devices:")
-        for port in COM_PORT:
-            print(f"  - {port}")
-        return
-    else:
-        print(f"✅ Arduino/Wemos found on {COM_PORT}")
 
     obs = connect_obs()
-    if not obs:
-        return
+    ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+    print(f"🎧 Listening on {COM_PORT}...")
 
-    # Attempt to open the serial port
-    try:
-        ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
-        print(f"🎧 Listening for Favero data on {COM_PORT}...")
-    except Exception as e:
-        print(f"❌ Serial Error: {e}")
-        return
-
-    # Track previous states to minimize OBS updates
-    last_visibility = {name: None for name in VISIBILITY_MAP.values()}
-    last_score_l = ""
-    last_score_r = ""
-    last_clock = ""
+    last_visibility = {k: None for k in VISIBILITY_MAP.values()}
+    last_score_l = last_score_r = last_clock = ""
+    last_left_name = last_right_name = ""
+    last_left_club = last_right_club = ""
 
     try:
         while True:
-            line = ser.readline().decode('utf-8', errors='ignore').strip()
-            
-            if not line.startswith("DATA,"):
-                continue  # Skip unrelated lines
+            line = ser.readline().decode(errors="ignore").strip()
+            if not line:
+                continue
 
-            parts = line.split(",")
+            # ---------------- DATA ----------------
+            if line.startswith("DATA,"):
+                parts = line.split(",")
 
-            # 1️⃣ Update lights/cards/priority
-            for idx, source_name in VISIBILITY_MAP.items():
-                if idx < len(parts):
-                    is_active = (parts[idx] == "1")
-                    if is_active != last_visibility[source_name]:
-                        item_id = get_item_id(obs, SCENE_NAME, source_name)
-                        if item_id is not None:
+                for idx, source in VISIBILITY_MAP.items():
+                    if idx < len(parts):
+                        active = parts[idx] == "1"
+                        if active != last_visibility[source]:
+                            item_id = get_item_id(obs, SCENE_NAME, source)
                             obs.call(requests.SetSceneItemEnabled(
                                 sceneName=SCENE_NAME,
                                 sceneItemId=item_id,
-                                sceneItemEnabled=is_active
+                                sceneItemEnabled=active
                             ))
-                            last_visibility[source_name] = is_active
+                            last_visibility[source] = active
 
-            # 2️⃣ Update scores
-            if len(parts) > 6:
                 score_l, score_r = parts[5], parts[6]
                 if score_l != last_score_l:
-                    obs.call(requests.SetInputSettings(
-                        inputName=LEFT_SCORE_INPUT,
-                        inputSettings={"text": score_l}
-                    ))
+                    set_text(obs, LEFT_SCORE_INPUT, score_l)
                     last_score_l = score_l
                 if score_r != last_score_r:
-                    obs.call(requests.SetInputSettings(
-                        inputName=RIGHT_SCORE_INPUT,
-                        inputSettings={"text": score_r}
-                    ))
+                    set_text(obs, RIGHT_SCORE_INPUT, score_r)
                     last_score_r = score_r
 
-            # 3️⃣ Update clock
-            if len(parts) > 8:
-                mins, secs = parts[7], parts[8].zfill(2)
-                current_clock = f"{mins}:{secs}"
-                if current_clock != last_clock:
-                    obs.call(requests.SetInputSettings(
-                        inputName=CLOCK_INPUT,
-                        inputSettings={"text": current_clock}
-                    ))
-                    last_clock = current_clock
+                clock = f"{parts[7]}:{parts[8].zfill(2)}"
+                if clock != last_clock:
+                    set_text(obs, CLOCK_INPUT, clock)
+                    last_clock = clock
+
+            # ---------------- QR ----------------
+            elif line.startswith("QR,"):
+                try:
+                    payload = json.loads(line[3:])
+                    side = payload["side"]
+                    name = payload["name"]
+                    club = payload["club"]
+
+                    img_path = os.path.join(CLUB_IMAGE_DIR, f"{club}.png")
+
+                    if side == "L":
+                        if name != last_left_name:
+                            set_text(obs, LEFT_NAME_INPUT, name)
+                            last_left_name = name
+                        if club != last_left_club and os.path.exists(img_path):
+                            set_image(obs, LEFT_CLUB_IMAGE, img_path)
+                            last_left_club = club
+
+                    elif side == "R":
+                        if name != last_right_name:
+                            set_text(obs, RIGHT_NAME_INPUT, name)
+                            last_right_name = name
+                        if club != last_right_club and os.path.exists(img_path):
+                            set_image(obs, RIGHT_CLUB_IMAGE, img_path)
+                            last_right_club = club
+
+                except Exception as e:
+                    print(f"⚠ QR parse error: {e}")
 
     except KeyboardInterrupt:
-        print("\n⏹ Shutting down bridge...")
+        print("\n⏹ Stopping bridge")
     finally:
         ser.close()
         obs.disconnect()
-        print("✅ Disconnected cleanly from OBS and serial port.")
 
 # -----------------------------
 if __name__ == "__main__":
