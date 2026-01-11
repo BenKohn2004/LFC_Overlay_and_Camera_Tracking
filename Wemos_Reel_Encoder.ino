@@ -18,8 +18,8 @@ int lastPrintedPosition = 0;
 int lastState = 0;  // Stores last encoder state
 
 // Hypotenuse and angle
-int hypotenuse = 0;
-float angle = 0.0;
+int hypotenuse = 250;
+float angle = 25.0;
 
 // Auto Zero Variables
 unsigned long lastPositionChange = 0;
