@@ -5,72 +5,80 @@
 const char* STRIP_NAME = "Strip 10";
 bool verbose = false;
 
+const unsigned long QR_COOLDOWN_MS = 500;
+unsigned long lastQRTime = 0;
+
 // ---------------- Message Structure ----------------
-// MUST match transmitter exactly
 struct struct_message {
-  uint8_t msgType;          // 0 = Favero data, 1 = QR data
+  uint8_t msgType;          // 0 = Favero, 1 = QR
   uint8_t macAddr[6];
 
-  // Scoring
   unsigned int Right_Score;
   unsigned int Left_Score;
   unsigned int Seconds_Remaining;
   unsigned int Minutes_Remaining;
 
-  // Lights
   bool Green_Light;
   bool Red_Light;
   bool White_Green_Light;
   bool White_Red_Light;
+
   bool Yellow_Green_Light;
   bool Yellow_Red_Light;
 
-  // Cards
   bool Yellow_Card_Green;
   bool Yellow_Card_Red;
   bool Red_Card_Green;
   bool Red_Card_Red;
 
-  // Priority
   bool Priority_Left;
   bool Priority_Right;
 
-  // QR or strip identifier
-  char customMessage[128];
+  char customMessage[128];  // JSON
 };
 
 struct struct_message incomingMessage;
+
+// ---------------- Utility ----------------
+bool isValidQRJson(const char* json) {
+  String s = String(json);
+
+  // Basic framing
+  if (!s.startsWith("{") || !s.endsWith("}")) return false;
+
+  // Required fields
+  if (s.indexOf("\"side\"") == -1) return false;
+  if (s.indexOf("\"name\"") == -1) return false;
+
+  return true;
+}
 
 // ---------------- ESP-NOW Receive Callback ----------------
 void OnDataRecv(uint8_t* mac, uint8_t* incomingData, uint8_t len) {
   memcpy(&incomingMessage, incomingData, sizeof(incomingMessage));
 
-  // ---------- Favero Scoring Data ----------
+  // ---------- Favero Data ----------
   if (incomingMessage.msgType == 0) {
 
     if (String(incomingMessage.customMessage) != STRIP_NAME) return;
 
     Serial.print("DATA,");
 
-    // Lights
     Serial.print(incomingMessage.Red_Light);         Serial.print(",");
     Serial.print(incomingMessage.Green_Light);       Serial.print(",");
     Serial.print(incomingMessage.White_Red_Light);   Serial.print(",");
     Serial.print(incomingMessage.White_Green_Light); Serial.print(",");
 
-    // Score & Time
     Serial.print(incomingMessage.Left_Score);        Serial.print(",");
     Serial.print(incomingMessage.Right_Score);       Serial.print(",");
     Serial.print(incomingMessage.Minutes_Remaining); Serial.print(",");
     Serial.print(incomingMessage.Seconds_Remaining); Serial.print(",");
 
-    // Cards
     Serial.print(incomingMessage.Yellow_Card_Red);   Serial.print(",");
     Serial.print(incomingMessage.Yellow_Card_Green); Serial.print(",");
     Serial.print(incomingMessage.Red_Card_Red);      Serial.print(",");
     Serial.print(incomingMessage.Red_Card_Green);    Serial.print(",");
 
-    // Priority
     Serial.print(incomingMessage.Priority_Left);     Serial.print(",");
     Serial.println(incomingMessage.Priority_Right);
 
@@ -81,9 +89,21 @@ void OnDataRecv(uint8_t* mac, uint8_t* incomingData, uint8_t len) {
     }
   }
 
-  // ---------- QR Code Payload ----------
+  // ---------- QR Payload ----------
   else if (incomingMessage.msgType == 1) {
-    // Pass JSON straight through to Python
+
+    unsigned long now = millis();
+    if (now - lastQRTime < QR_COOLDOWN_MS) return;
+    lastQRTime = now;
+
+    if (!isValidQRJson(incomingMessage.customMessage)) {
+      if (verbose) {
+        Serial.println("⚠ Invalid QR JSON dropped:");
+        Serial.println(incomingMessage.customMessage);
+      }
+      return;
+    }
+
     Serial.print("QR,");
     Serial.println(incomingMessage.customMessage);
 
@@ -114,5 +134,5 @@ void setup() {
 
 // ---------------- Loop ----------------
 void loop() {
-  // Nothing needed — event driven
+  // Event driven
 }
