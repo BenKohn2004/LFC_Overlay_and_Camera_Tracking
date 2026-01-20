@@ -1,6 +1,5 @@
 import serial
 import time
-import json
 from obswebsocket import obsws, requests
 import serial.tools.list_ports
 import os
@@ -42,7 +41,10 @@ VISIBILITY_MAP = {
 # -----------------------------
 def find_arduino():
     ports = list(serial.tools.list_ports.comports())
-    devices = [p.device for p in ports if any(k in p.description for k in ["USB", "CH340", "Arduino"])]
+    devices = [
+        p.device for p in ports
+        if any(k in p.description for k in ["USB", "CH340", "Arduino"])
+    ]
     return (devices[0], 1) if len(devices) == 1 else (devices, len(devices))
 
 # -----------------------------
@@ -117,6 +119,7 @@ def main():
                 if score_l != last_score_l:
                     set_text(obs, LEFT_SCORE_INPUT, score_l)
                     last_score_l = score_l
+
                 if score_r != last_score_r:
                     set_text(obs, RIGHT_SCORE_INPUT, score_r)
                     last_score_r = score_r
@@ -129,10 +132,16 @@ def main():
             # ---------------- QR ----------------
             elif line.startswith("QR,"):
                 try:
-                    payload = json.loads(line[3:])
-                    side = payload["side"]
-                    name = payload["name"]
-                    club = payload["club"]
+                    # Expected format: QR,L,Name,Club
+                    parts = line.split(",", 3)
+                    if len(parts) < 4:
+                        print(f"⚠ Incomplete QR line: {line}")
+                        continue
+
+                    _, side, name, club = parts
+                    side = side.upper().strip()
+                    name = name.strip()
+                    club = club.strip()
 
                     img_path = os.path.join(CLUB_IMAGE_DIR, f"{club}.png")
 
@@ -140,6 +149,7 @@ def main():
                         if name != last_left_name:
                             set_text(obs, LEFT_NAME_INPUT, name)
                             last_left_name = name
+
                         if club != last_left_club and os.path.exists(img_path):
                             set_image(obs, LEFT_CLUB_IMAGE, img_path)
                             last_left_club = club
@@ -148,6 +158,7 @@ def main():
                         if name != last_right_name:
                             set_text(obs, RIGHT_NAME_INPUT, name)
                             last_right_name = name
+
                         if club != last_right_club and os.path.exists(img_path):
                             set_image(obs, RIGHT_CLUB_IMAGE, img_path)
                             last_right_club = club
