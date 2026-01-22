@@ -6,6 +6,10 @@
 
 bool verbose = false;  // Enable serial output
 
+// --- CONFIGURATION CONSTANTS ---
+const float center_line = 182.0; // Adjustable offset/geometry value
+// -------------------------------
+
 // Pin definitions
 const int pinA = D5;
 const int pinB = D6;
@@ -141,7 +145,9 @@ void loop() {
     lastButtonPress2 = currentMillis;
 
     if (hypotenuse != 0) {
-      angle = asin(182.0 / hypotenuse) * (180.0 / M_PI);
+      // Calculate angle using the new center_line variable
+      angle = asin(center_line / hypotenuse) * (180.0 / M_PI);
+      
       Serial.print("Hypotenuse: ");
       Serial.println(hypotenuse);
       Serial.print("Angle: ");
