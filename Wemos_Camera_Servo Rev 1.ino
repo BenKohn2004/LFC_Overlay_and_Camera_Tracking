@@ -11,9 +11,9 @@ bool invertServo = false;
 const int servoPin = D4;
 
 // ---------------- Motion Control ----------------
-const float TARGET_ALPHA = 0.15;
-const float MAX_SPEED = 90.0;      // deg/sec
-const float MAX_ACCEL = 300.0;     // deg/sec^2
+const float TARGET_ALPHA = 0.18;
+const float MAX_SPEED = 100.0;     // deg/sec
+const float MAX_ACCEL = 400.0;     // deg/sec^2
 const unsigned long SERVO_INTERVAL_MS = 20;
 
 float current_angle = 90.0;
