@@ -1,1 +1,76 @@
-LFC Overlay & Camera Tracking SystemAn integrated broadcasting solution for fencing that features automated camera tracking, real-time scoring data, and QR-based athlete registration.🚀 OverviewThis project automates the production of fencing livestreams by synchronizing three independent systems through an ESP-NOW wireless network and a Python-to-OBS bridge.Camera Tracking: A servo-mounted camera follows the fencers by measuring the distance of the Favero reels.Scoring Overlay: Real-time lights, score, and time data pulled directly from the Favero FA-05 scoring machine.QR Registration: A handheld scanner to instantly update fencer names and club affiliations in the broadcast.🏗 System ArchitectureThe system utilizes ESP8266 (Wemos D1 Mini) microcontrollers communicating via ESP-NOW (low-latency protocol) to a central receiver connected to a laptop running OBS (Open Broadcaster Software).1. Camera Tracking SystemThe camera uses a quadrature encoder mounted on the Favero reel drum to calculate fencer positions.Hardware: * Servo: DS3218 (270° Digital Servo).Camera: 2K HD Manual Varifocal (2.8-12mm) USB Camera.Sensors: TCRT5000 IR sensors mounted in a custom 3D-printed optical holder.Logic: The system measures the length of the reel played out. By calculating the midpoint between two fencers, the servo rotates the camera to keep the action centered.Calibration: * Update center_line and hypotenuse in Wemos_Reel_Encoder.ino based on your camera's distance from the strip.Use the onboard potentiometer on the TCRT5000 to tune sensitivity until the white bars on the encoder ring are reliably detected.2. Scoring Machine IntegrationThe system intercepts the data stream from a Favero FA-05 via the RJ11 port.Wiring: Connect according to Schematic_Favero-Parser-and-Receiver_2025-12-16.pdf.Compatibility: Use Wemos D1 Mini versions with the CH340 chip for best results.Configuration: Assign a unique Box Name in the code if running multiple strips simultaneously.3. QR Code ScannerFor rapid fencer changes during tournaments.Hardware: Waveshare Round 2D Code Scanner Module.Function: Scans fencer/club info and transmits it wirelessly to the OBS bridge to update text sources instantly.💻 Software & OBS IntegrationThe Python Bridge (Favero_OBS_Bridge.py)This script acts as the "brain." It listens to the Serial port for data from the Wemos receiver and pushes it to OBS via Websockets.Setup:Install dependencies: pip install obsws-python pyserialUpdate the script with your OBS Websocket password and local image asset paths.Import the provided OBS scene: Camera_Tracking_Favero_Overlay.json.📐 Mathematics of TrackingThe system assumes the camera is placed at a fixed offset from the center of the strip. The angle $\theta$ for the servo is calculated using:$$\theta = \arctan\left(\frac{\text{Midpoint Distance}}{\text{Camera Offset}}\right)$$Where the midpoint is derived from the quadrature pulses converted to linear distance ($L$ and $R$).🛠 Fabrication FilesPCBs: Gerber files are located in Gerber_Favero_Optical_Encoder_PCB.zip (Compatible with PCBWay/JLCPCB).3D Prints:Optical Sensor HolderQR Scanner Housing⚠️ Known Issues / TroubleshootingEncoder Slip: If the encoder ring on the Favero drum is loose, the camera may "drift." Ensure it is flush and the counts return to zero when fully retracted.Ambient Light: Calibrate IR sensors in lighting conditions similar to your venue to avoid false triggers.
+# LFC Overlay & Camera Tracking System
+
+An integrated broadcasting solution for fencing that features **automated camera tracking**, real-time scoring data, and QR-based athlete registration.
+
+## 🚀 Overview
+This project automates the production of fencing livestreams by synchronizing three independent systems through an ESP-NOW wireless network and a Python-to-OBS bridge.
+
+1.  **Camera Tracking:** A servo-mounted camera follows the fencers by measuring the distance of the Favero reels.
+2.  **Scoring Overlay:** Real-time lights, score, and time data pulled directly from the Favero FA-05 scoring machine.
+3.  **QR Registration:** A handheld scanner to instantly update fencer names and club affiliations in the broadcast.
+
+---
+
+## 🏗 System Architecture
+The system utilizes **ESP8266 (Wemos D1 Mini)** microcontrollers communicating via **ESP-NOW** (a low-latency wireless protocol) to a central receiver connected to a laptop running **OBS (Open Broadcaster Software)**.
+
+### 1. Camera Tracking System
+The camera uses a quadrature encoder mounted on the Favero reel drum to calculate fencer positions in real-time.
+
+* **Hardware:**
+    * **Servo:** DS3218 (270° Digital Servo).
+    * **Camera:** 2K HD Manual Varifocal (2.8-12mm) USB Camera with CS Lens.
+    * **Sensors:** TCRT5000 IR sensors.
+* **Logic:** The system measures the length of the reel cable played out. By calculating the midpoint between the two fencers, the servo rotates the camera to keep the action centered.
+* **Calibration:**
+    * Update `center_line` and `hypotenuse` in `Wemos_Reel_Encoder.ino` based on your camera's physical distance from the strip.
+    * The TCRT5000 sensors must be calibrated using the onboard potentiometer; dial the sensitivity until it reliably detects the white bars on the encoder ring but ignores the black.
+* **3D Files:** The [Optical Sensor Holder](https://cad.onshape.com/documents/fab3dbb0c6cd24d122a26ac7/w/167803772a56f7a36cd09560/e/40a31ee80700d67aef5da61b) is designed to fit snugly against the rivet on the back of the Favero reel.
+
+### 2. Scoring Machine Integration
+The system intercepts the data stream from a **Favero FA-05** via the RJ11 data port.
+
+* **Wiring:** See `Schematic_Favero-Parser-and-Receiver_2025-12-16.pdf`. 
+* **Note:** Use the Wemos version employing the **CH340 chip** for maximum stability.
+* **Configuration:** Each "Parser" Wemos must have a unique `Box Name` if you are managing multiple strips. Update the code with the MAC address of your central receiver.
+
+### 3. QR Code Scanner
+For rapid fencer changes during tournaments. This module allows you to scan a fencer's info and have OBS update the names/clubs instantly.
+
+* **Hardware:** Waveshare Round 2D Codes Scanner Module.
+* **Housing:** [3D Model for QR Reader](https://cad.onshape.com/documents/1d7ee73f291c58a099dbd764/w/b41d5c9f579bbfb616cc79d3/e/3b1fc9ae92bd20791cf18614).
+
+---
+
+## 💻 Software & OBS Integration
+
+### The Python Bridge (`Favero_OBS_Bridge.py`)
+This script acts as the "brain." It listens to the Serial port for data from the Wemos receiver and pushes it to OBS via **Websockets**.
+
+* **Setup:**
+    1.  Install dependencies: `pip install obsws-python pyserial`.
+    2.  Update the script with your OBS Websocket password and local image asset paths.
+    3.  Import the provided OBS scene: `Camera_Tracking_Favero_Overlay.json`.
+
+---
+
+## 📐 Mathematics of Tracking
+The system calculates the midpoint between the two fencers to determine the servo angle. If the camera is placed at a distance $D$ from the center of the strip, and the fencers are at positions $L$ and $R$ relative to the reels:
+
+$$\text{Midpoint} = \frac{L + R}{2}$$
+
+The required servo angle $\theta$ is determined by:
+
+$$\theta = \arctan\left(\frac{\text{Midpoint}}{D}\right)$$
+
+---
+
+## ⚠️ Troubleshooting
+* **Inconsistent Counting:** Usually caused by the encoder ring coming loose from the Favero drum. Ensure it is securely attached and the reel returns to "zero" when fully retracted.
+* **Environmental Light:** If the IR sensors struggle, try calibrating them in a dimmer environment to simulate the interior of the reel housing.
+* **Serial Connection:** Ensure the Wemos receiver is assigned to the correct COM port in the Python script.
+
+---
+
+## 🛠 Fabrication
+* **PCBs:** The board is panelized and includes both the external housing portion and the TCRT5000 connector. Find the files in `Gerber_Favero_Optical_Encoder_PCB.zip`.
