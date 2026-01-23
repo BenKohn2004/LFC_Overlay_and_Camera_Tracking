@@ -26,10 +26,10 @@ The camera uses a [quadrature encoder ring](https://github.com/BenKohn2004/LFC_O
     * Update `center_line` and `hypotenuse` in `Wemos_Reel_Encoder.ino` based on your camera's physical distance from the strip.
          This is done by connecting the reel with the encoder, zeroing it through the PCB mounted button and then extending the reel cord to the center line and camera while taking note of the value of 'position' listed on the PCB's [OLED display](https://www.aliexpress.us/item/3256805954920554.html)
     * The TCRT5000 sensors must be calibrated using the onboard potentiometer; dial the sensitivity until it reliably detects the white bars on the encoder ring but ignores the black. It is worth verifying each bar on the encoder ring. The position will drift off zero during use if the sensor does not reliably detect the bars.
-* **3D Files:** The [Optical Sensor Holder](https://www.onshape.com/en/) is publicliy availabe through OnShape and is title Favero Reel Optical Holder. It is designed to fit snugly against the rivet on the back of the Favero reel.
+* **3D Files:** The [Optical Sensor Holder](https://www.onshape.com/en/) is publicliy availabe through OnShape and is titled Favero Reel Optical Holder. It is designed to fit snugly against the rivet on the back of the Favero reel.
 
 ### 2. Scoring Machine Integration
-The system intercepts the data stream from a **Favero FA-05** via the RJ11 data port.
+The system uses the data stream from a **Favero FA-05** via the RJ11 data port.
 
 * **Wiring:** See `Schematic_Favero-Parser-and-Receiver_2025-12-16.pdf`. 
 * **Note:** Use the Wemos version employing the **CH340 chip** for maximum stability.
