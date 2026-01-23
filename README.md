@@ -12,7 +12,7 @@ This project automates the livestreams using three relatively independent system
 ---
 
 ## 🏗 System Architecture
-The system utilizes **ESP8266 (Wemos D1 Mini)** microcontrollers communicating via **ESP-NOW** (a low-latency wireless protocol) to a central receiver connected to a laptop running **OBS (Open Broadcaster Software)**.
+The system utilizes **ESP8266 (Wemos D1 Mini)** microcontrollers communicating via **ESP-NOW** (a low-latency wireless protocol) to a central receiver (Wemos) connected to a laptop running **OBS (Open Broadcaster Software)**.
 
 ### 1. Camera Tracking System
 The camera uses a quadrature encoder mounted on the Favero reel drum to calculate fencer positions in real-time.
