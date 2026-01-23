@@ -15,12 +15,12 @@ This project automates the livestreams using three relatively independent system
 The system utilizes **ESP8266 (Wemos D1 Mini)** microcontrollers communicating via **ESP-NOW** (a low-latency wireless protocol) to a central receiver (Wemos) connected to a laptop running **OBS (Open Broadcaster Software)**.
 
 ### 1. Camera Tracking System
-The camera uses a [quadrature encoder ring](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Favero%20Reel%20Encoder%20Tiled.pdf) mounted on the Favero reel drum to calculate fencer positions in real-time. The ring segments were printed out on [8 1/2 x 11](https://www.amazon.com/Labelchoice-Shipping-Printers-Adhesive-Mailing/dp/B0B5RCBMW8) labels and adhered to the base of the Favero Reel drum.
+The camera uses a [quadrature encoder ring](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Favero%20Reel%20Encoder%20Tiled.pdf) mounted on the Favero reel drum to calculate fencer positions in real-time. The ring segments were printed out on [8 1/2 x 11 labels](https://www.amazon.com/Labelchoice-Shipping-Printers-Adhesive-Mailing/dp/B0B5RCBMW8) and adhered to the base of the Favero Reel drum.
 
 * **Hardware:**
-    * **Servo:** DS3218 (270° Digital Servo).
-    * **Camera:** 2K HD Manual Varifocal (2.8-12mm) USB Camera with CS Lens.
-    * **Sensors:** TCRT5000 IR sensors.
+    * **Servo:** [DS3218 (270° Digital Servo)](https://www.aliexpress.us/item/3256807308983626.html).
+    * **Camera:** [2K HD Manual Varifocal](https://www.aliexpress.us/item/3256808470911939.html) (2.8-12mm) USB Camera with CS Lens.
+    * **Sensors:** [TCRT5000 IR](https://www.aliexpress.us/item/3256806722701672.html) sensors.
 * **Logic:** The system measures the length of the reel cable played out. By calculating the midpoint between the two fencers, the servo rotates the camera to keep the action centered.
 * **Calibration:**
     * Update `center_line` and `hypotenuse` in `Wemos_Reel_Encoder.ino` based on your camera's physical distance from the strip.
