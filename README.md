@@ -5,7 +5,7 @@ A broadcasting solution for fencing that features **automated camera tracking** 
 ## 🚀 Overview
 This project automates the livestreams using three relatively independent systems through an ESP-NOW wireless network and a Python-to-OBS bridge.
 
-1.  **Camera Tracking:** A servo-mounted camera follows the fencers by measuring the payout of the Favero reels.
+1.  **Camera Tracking:** A servo-mounted camera follows the fencers by measuring the unspooling of the Favero reels.
 2.  **Scoring Overlay:** Real-time lights, score, and time data pulled from the Favero FA-05 scoring machine.
 3.  **QR Registration:** A handheld scanner to update fencer names and club affiliations in the broadcast.
 
@@ -21,7 +21,7 @@ The camera uses a [quadrature encoder ring](https://github.com/BenKohn2004/LFC_O
     * **Servo:** [DS3218 (270° Digital Servo)](https://www.aliexpress.us/item/3256807308983626.html).
     * **Camera:** [2K HD Manual Varifocal](https://www.aliexpress.us/item/3256808470911939.html) (2.8-12mm) USB Camera with CS Lens.
     * **Sensors:** [TCRT5000 IR](https://www.aliexpress.us/item/3256806722701672.html) sensors.
-* **Logic:** The system measures the length of the reel cable played out. By calculating the midpoint between the two fencers, the servo rotates the camera to keep the action centered.
+* **Logic:** The system measures the length of the reel cable played out. By calculating the midpoint between the two ends of the Favero reel cables, the servo rotates the camera to keep the action centered.
 * **Calibration:**
     * Update `center_line` and `hypotenuse` in `Wemos_Reel_Encoder.ino` based on your camera's physical distance from the strip.
     * The TCRT5000 sensors must be calibrated using the onboard potentiometer; dial the sensitivity until it reliably detects the white bars on the encoder ring but ignores the black.
