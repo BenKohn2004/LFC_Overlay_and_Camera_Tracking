@@ -1,13 +1,13 @@
 # LFC Overlay & Camera Tracking System
 
-An integrated broadcasting solution for fencing that features **automated camera tracking**, real-time scoring data, and QR-based athlete registration.
+A broadcasting solution for fencing that features **automated camera tracking** and repeats scoring machine data onto the livestream overlay.
 
 ## 🚀 Overview
-This project automates the production of fencing livestreams by synchronizing three independent systems through an ESP-NOW wireless network and a Python-to-OBS bridge.
+This project automates the livestreams using three relatively independent systems through an ESP-NOW wireless network and a Python-to-OBS bridge.
 
-1.  **Camera Tracking:** A servo-mounted camera follows the fencers by measuring the distance of the Favero reels.
-2.  **Scoring Overlay:** Real-time lights, score, and time data pulled directly from the Favero FA-05 scoring machine.
-3.  **QR Registration:** A handheld scanner to instantly update fencer names and club affiliations in the broadcast.
+1.  **Camera Tracking:** A servo-mounted camera follows the fencers by measuring the payout of the Favero reels.
+2.  **Scoring Overlay:** Real-time lights, score, and time data pulled from the Favero FA-05 scoring machine.
+3.  **QR Registration:** A handheld scanner to update fencer names and club affiliations in the broadcast.
 
 ---
 
