@@ -2,24 +2,24 @@
 #include <Adafruit_SSD1306.h>
 #include <ESP8266WiFi.h>
 #include <espnow.h>
-#include <math.h>  // Include for trigonometric functions
+#include <math.h>
 
-bool verbose = false;  // Enable serial output
+bool verbose = false;
 
 // --- CONFIGURATION CONSTANTS ---
-const float center_line = 182.0; // Adjustable offset/geometry value
+const float center_line = 182.0; 
 // -------------------------------
 
-// Pin definitions
-const int pinA = D5;
-const int pinB = D6;
-const int buttonPin1 = D7;  // Reset position
-const int buttonPin2 = D0;  // Save position to hypotenuse
+// Pin definitions (Updated per your request)
+const int pinA = D5;        // Hall Effect Sensor A
+const int pinB = D6;        // Hall Effect Sensor B
+const int buttonReset = D7; // Reset position
+const int buttonSave  = D0; // Save hypotenuse
 
 // Position tracking
 volatile int position = 0;
 int lastPrintedPosition = 0;
-int lastState = 0;  // Stores last encoder state
+volatile int lastState = 0; 
 
 // Hypotenuse and angle
 int hypotenuse = 250;
@@ -27,8 +27,8 @@ float angle = 25.0;
 
 // Auto Zero Variables
 unsigned long lastPositionChange = 0;
-const unsigned long autoZeroDelay = 300000;  // 5 minutes in milliseconds
-bool enableAutoZero = true;  // Set to false to disable auto-zeroing
+const unsigned long autoZeroDelay = 300000; 
+bool enableAutoZero = true;
 
 // OLED Display Setup
 #define SCREEN_WIDTH 128
@@ -37,150 +37,113 @@ bool enableAutoZero = true;  // Set to false to disable auto-zeroing
 #define SCREEN_ADDRESS 0x3C
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Button debounce
-unsigned long lastButtonPress1 = 0;
-unsigned long lastButtonPress2 = 0;
-const unsigned long debounceDelay = 200;
-
 // ESPNOW Setup
 uint8_t receiverMac[] = { 0xA4, 0xCF, 0x12, 0xF3, 0x04, 0x42 };
-
-// Data structure for ESPNOW
 typedef struct struct_message {
-  uint8_t senderID;  // Unique ID for the sender
+  uint8_t senderID;
   int position;
   float angle;
 } struct_message;
-
 struct_message outgoingData;
 
 // Quadrature lookup table
 const int8_t quadratureTable[4][4] = {
-  { 0, +1, -1, 0 },  // 00 -> (00, 01, 10, 11)
-  { -1, 0, 0, +1 },  // 01 -> (00, 01, 10, 11)
-  { +1, 0, 0, -1 },  // 10 -> (00, 01, 10, 11)
-  { 0, -1, +1, 0 }   // 11 -> (00, 01, 10, 11)
+  { 0, +1, -1, 0 },
+  { -1, 0, 0, +1 },
+  { +1, 0, 0, -1 },
+  { 0, -1, +1, 0 }
 };
 
-// Interrupt function for encoder
+// Interrupt function for Hall Effect (Active LOW)
 void ICACHE_RAM_ATTR updatePosition() {
-  int currentState = (digitalRead(pinA) << 1) | digitalRead(pinB);
+  // A3144: LOW = Magnet Detected (1), HIGH = No Magnet (0)
+  int valA = (digitalRead(pinA) == LOW) ? 1 : 0;
+  int valB = (digitalRead(pinB) == LOW) ? 1 : 0;
+  
+  int currentState = (valA << 1) | valB;
   int change = quadratureTable[lastState][currentState];
-  position += change;
-  lastState = currentState;  // Update state
-}
-
-// ESPNOW send callback
-void onDataSent(uint8_t *macAddr, uint8_t sendStatus) {
-  if (verbose) {
-    Serial.print("Send status: ");
-    Serial.println(sendStatus == 0 ? "Success" : "Fail");
-  }
-}
-
-void autoZeroIfNeeded(unsigned long currentMillis) {
-  if (!enableAutoZero) return;  // Skip if disabled
-
-  if (position != 0 && currentMillis - lastPositionChange > autoZeroDelay) {
-    position = 0;
-    Serial.println("Auto-zeroed after 5 minutes of inactivity.");
-    lastPositionChange = currentMillis;  // Prevent repeated zeroing
+  
+  if (change != 0) {
+    position += change;
+    lastState = currentState;
   }
 }
 
 void setup() {
   Serial.begin(115200);
 
-  // Pin setup
+  // Pin setup for Hall Sensors
   pinMode(pinA, INPUT);
   pinMode(pinB, INPUT);
-  pinMode(buttonPin1, INPUT_PULLUP);
-  pinMode(buttonPin2, INPUT_PULLUP);
+  
+  pinMode(buttonReset, INPUT_PULLUP);
+  pinMode(buttonSave, INPUT_PULLUP);
 
-  // OLED Display setup
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    while (true)
-      ;
+    Serial.println(F("OLED failed"));
+    for(;;);
   }
   display.display();
-  delay(2000);
 
-  // Initial encoder state
-  lastState = (digitalRead(pinA) << 1) | digitalRead(pinB);
+  // Initial state capture
+  int initA = (digitalRead(pinA) == LOW) ? 1 : 0;
+  int initB = (digitalRead(pinB) == LOW) ? 1 : 0;
+  lastState = (initA << 1) | initB;
 
-  // Attach interrupts
+  // Interrupts on both pins for maximum resolution
   attachInterrupt(digitalPinToInterrupt(pinA), updatePosition, CHANGE);
   attachInterrupt(digitalPinToInterrupt(pinB), updatePosition, CHANGE);
 
-  // ESPNOW Setup
+  // ESPNOW Initialization
   WiFi.mode(WIFI_STA);
-  if (esp_now_init() != 0) {
-    Serial.println("Error initializing ESP-NOW");
-    return;
+  if (esp_now_init() == 0) {
+    esp_now_set_self_role(ESP_NOW_ROLE_CONTROLLER);
+    esp_now_add_peer(receiverMac, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
   }
-  esp_now_set_self_role(ESP_NOW_ROLE_CONTROLLER);
-  esp_now_add_peer(receiverMac, ESP_NOW_ROLE_SLAVE, 1, NULL, 0);
-  esp_now_register_send_cb(onDataSent);
-
-  Serial.println("Optical Encoder with ESPNOW Ready");
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // Check for auto-zero condition
-  autoZeroIfNeeded(currentMillis);
-
-  // Button 1: Reset position
-  if (digitalRead(buttonPin1) == LOW && currentMillis - lastButtonPress1 > debounceDelay) {
+  // Auto-zero logic
+  if (enableAutoZero && position != 0 && (currentMillis - lastPositionChange > autoZeroDelay)) {
     position = 0;
-    lastButtonPress1 = currentMillis;
-    Serial.println("Position reset to 0");
+    lastPositionChange = currentMillis;
   }
 
-  // Button 2: Save position as hypotenuse and calculate angle
-  if (digitalRead(buttonPin2) == LOW && currentMillis - lastButtonPress2 > debounceDelay) {
+  // Reset Button logic
+  if (digitalRead(buttonReset) == LOW) {
+    position = 0;
+    delay(200); 
+  }
+
+  // Calculate Angle logic
+  if (digitalRead(buttonSave) == LOW) {
     hypotenuse = position;
-    lastButtonPress2 = currentMillis;
-
     if (hypotenuse != 0) {
-      // Calculate angle using the new center_line variable
-      angle = asin(center_line / hypotenuse) * (180.0 / M_PI);
-      
-      Serial.print("Hypotenuse: ");
-      Serial.println(hypotenuse);
-      Serial.print("Angle: ");
-      Serial.println(angle);
-    } else {
-      Serial.println("Error: Hypotenuse is zero. Cannot calculate angle.");
+      // Use abs() to ensure angle remains valid regardless of rotation direction
+      angle = asin(center_line / abs(hypotenuse)) * (180.0 / M_PI);
     }
+    delay(200);
   }
 
-  // Send data via ESPNOW
-  outgoingData.senderID = 1;  // ID of 1 is the Left Reel, ID of 2 is the Right Reel
+  // Package and Transmit
+  outgoingData.senderID = 1; 
   outgoingData.position = position;
   outgoingData.angle = angle;
   esp_now_send(receiverMac, (uint8_t *)&outgoingData, sizeof(outgoingData));
 
-  // Update OLED only if position changes
+  // OLED Refresh
   if (position != lastPrintedPosition) {
-    lastPositionChange = currentMillis;  // Track last change time
+    lastPositionChange = currentMillis;
     display.clearDisplay();
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0, 0);
-    display.print("Position: ");
-    display.println(position);
-    display.print("Hypotenuse: ");
-    display.println(hypotenuse);
-    display.print("Angle: ");
-    display.println(hypotenuse != 0 ? angle : 0);
+    display.setCursor(0,0);
+    display.print("Pos: "); display.println(position);
+    display.print("Hyp: "); display.println(hypotenuse);
+    display.print("Ang: "); display.println(angle);
     display.display();
     lastPrintedPosition = position;
-  }
-
-  if (verbose) {
-    delay(50);  // Small delay for readability
   }
 }
