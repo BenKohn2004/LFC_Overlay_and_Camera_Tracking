@@ -128,7 +128,7 @@ void loop() {
   }
 
   // Package and Transmit
-  outgoingData.senderID = 1; 
+  outgoingData.senderID = 1; //1 For Left and 2 for Right
   outgoingData.position = position;
   outgoingData.angle = angle;
   esp_now_send(receiverMac, (uint8_t *)&outgoingData, sizeof(outgoingData));
