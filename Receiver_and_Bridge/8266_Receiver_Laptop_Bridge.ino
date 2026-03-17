@@ -2,7 +2,7 @@
 #include <espnow.h>
 
 // Set this to match the #define BoxName in your transmitter (e.g., "Strip 1", "Strip 2")
-#define TargetBox "Strip 2"
+#define TargetBox "Strip 1"
 
 // ================= MESSAGE STRUCTS =================
 struct FaveroMessage {
