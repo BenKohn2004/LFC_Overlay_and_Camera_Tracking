@@ -4,7 +4,7 @@
 // ---------------- Configuration ----------------
 #define TEST_MODE false     // true = simulate hits
 #define VERBOSE   false
-#define BOX_NAME "Strip 10"
+#define BOX_NAME "Strip 1"
 
 // REPLACE with MAC of RECEIVER Wemos
 uint8_t receiverAddress[] = {0xE0, 0x98, 0x06, 0x9D, 0x3F, 0x3C};
