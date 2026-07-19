@@ -360,7 +360,12 @@ void loop() {
   // always goes out on the next allowed tick - including after a WiFi
   // dropout, since nothing sends while the link is down.
 #if USE_SOFTAP
-  bool link_up = WiFi.softAPgetStationNum() > 0;
+  // Broadcast unconditionally in SoftAP mode. This used to gate on
+  // softAPgetStationNum() > 0, but the ESP8266 AP silently expires stations
+  // that only listen (the Pi receives broadcasts and never transmits), which
+  // froze all telemetry until the station re-announced itself. Ten 67-byte
+  // packets per second cost negligible airtime even with no stations attached.
+  bool link_up = true;
 #else
   bool link_up = WiFi.status() == WL_CONNECTED;
 #endif
