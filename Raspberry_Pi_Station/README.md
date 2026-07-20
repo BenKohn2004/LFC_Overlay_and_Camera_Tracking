@@ -1,0 +1,77 @@
+# Raspberry Pi Fencing Station
+
+A self-contained recording and review station for a fencing strip, built on a
+Raspberry Pi 5 with a 7" touchscreen (800x480) and a USB webcam. It pairs with
+the Skewered UDP transmitter in [`../Skewered/`](../Skewered/)
+(`8266_Skewered_Parser_and_Transmitter_UDP.ino`), which broadcasts the scoring
+box state over Wi-Fi.
+
+## What it does
+
+- **Live view with overlay** — webcam video fullscreen on the touchscreen with
+  scores, clock, hit/off-target lights, cards, and priority rendered from the
+  box telemetry (styled after the OBS Favero overlay in this repo).
+- **Automatic recording** — any box activity (light, clock, score change)
+  starts recording; it stops 5 minutes after the last activity. No buttons.
+  Video is 720p30 H.264 with the overlay burned in, written as crash-safe
+  5-minute fragmented-MP4 segments. Oldest segments are auto-deleted when the
+  disk runs low.
+- **Touch database** — every touch (which lights, score before/after), card,
+  and priority is logged to SQLite with its exact position in the video. A new
+  bout starts whenever the score resets to 0-0; fencer names are stored
+  per-bout.
+- **On-screen bout browser** — tap `BOUTS` for a list of bouts (names, final
+  score, touch count), tap a bout for its touches, tap a touch to watch a
+  looping replay (a few seconds before the light to a couple after). `REPLAY`
+  plays the latest touch instantly. Recording continues during playback, and a
+  real touch at the strip interrupts any replay.
+- **Name entry** — tap a nameplate for an on-screen keyboard with quick-select
+  chips of recently used names.
+- **Transmitter health telemetry** — the companion sketch broadcasts a
+  1 Hz debug beacon (uptime, loop rate, serial byte counters, send failures,
+  free heap) on port 4211; `debug_logger.py` records it so radio problems can
+  be diagnosed after the fact.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `station.py` | The whole station: capture, overlay, recording, database, touch UI |
+| `debug_logger.py` | Logs the transmitter's debug beacon (port 4211) |
+| `start_station.sh` | Boot launcher: waits for the webcam, starts logger + station |
+| `skewered-station.desktop` | XDG autostart entry (`~/.config/autostart/`) |
+| `udp_listen.py`, `udp_watch.py` | Small debugging listeners for the telemetry |
+| `assets/` | Overlay art (same images the OBS overlay uses) |
+
+## Setup (Raspberry Pi OS, Wayland desktop)
+
+1. Copy this directory to `~/skewered/` on the Pi (with `assets/` inside).
+2. Dependencies: `python3-pygame`, `numpy`, and `ffmpeg` (all present on the
+   standard Raspberry Pi OS desktop image; OpenCV is not needed).
+3. Join the Pi's Wi-Fi to the transmitter's `SkeweredNet` access point. Two
+   settings matter for reliable UDP broadcast reception:
+   `wifi.powersave = 2` (off) and the AP's BSSID pinned on the connection
+   profile (stops roaming scans, which silently drop broadcasts).
+4. Install the autostart entry:
+   `cp skewered-station.desktop ~/.config/autostart/`
+5. Reboot. The station starts fullscreen on the touchscreen.
+
+Manual start:
+`WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 python3 station.py`
+Flags: `--secs N` (timed run), `--force-record` (record without box activity).
+Exit: ESC, or press-and-hold the live view for 2 seconds.
+
+Fencer names live in `~/skewered/fencers.txt` (line 1 = left, line 2 = right);
+the on-screen editor maintains it for you.
+
+## Hardware notes
+
+- **Pi 5 has no hardware video encoder** — encoding is software x264, so use a
+  webcam that outputs **MJPEG** (the camera does the compression; the Pi's
+  four cores handle 720p30 encode + overlay + display at ~30 fps).
+- RS-485 from the scoring box needs proper **failsafe biasing** (~460-680 Ohm
+  pull-up on A, pull-down on B). Weak bias (10 kOhm) lets the converter
+  chatter garbage into the transmitter when the line idles.
+- The transmitter sketch bounds its serial parsing per loop and broadcasts
+  unconditionally — see the commit history in `../Skewered/` for the failure
+  modes that motivated both.

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Skewered Fencing Station
+Comment=Live camera overlay + recording
+Exec=/home/ben/skewered/start_station.sh
+X-GNOME-Autostart-enabled=true
