@@ -70,6 +70,13 @@ struct __attribute__((packed)) FaveroMessage {
 FaveroMessage myData;
 bool new_data = false;
 
+// Debug telemetry counters (reported once per second on port 4211)
+uint32_t loopCount = 0;
+uint32_t rxBytes = 0;
+uint32_t validPackets = 0;
+uint32_t sendFails = 0;
+unsigned long lastGoodSend = 0;   // millis of last successful endPacket
+
 // ---------------- Helper Functions ----------------
 
 bool isChecksumValid(uint8_t *packet) {
@@ -243,8 +250,15 @@ void Skewered_Parser() {
   static byte lastPacket[16];
   static int pIdx = 0;
 
-  while (BoxSerial.available()) {
+  // Bound the drain time: with a floating/weakly-biased RS-485 line the
+  // converter chatters continuously, and an unbounded while() never returns —
+  // starving loop() and the UDP heartbeat until the watchdog reboots us into
+  // the same noise. 8 ms per call keeps worst-case heartbeat latency low
+  // while draining far faster than 115200 baud can refill.
+  unsigned long drainStart = millis();
+  while (BoxSerial.available() && millis() - drainStart < 8) {
     byte b = BoxSerial.read();
+    rxBytes++;
 
     if (b == 0xEE) pIdx = 0;
 
@@ -254,6 +268,7 @@ void Skewered_Parser() {
 
     if (pIdx == 16) {
       if (isChecksumValid(currentPacket) && currentPacket[15] == 0xFF) {
+        validPackets++;
 
         bool isDifferent = false;
         for (int i = 0; i < 16; i++) {
@@ -297,11 +312,48 @@ void sendUdpUpdate() {
   Udp.beginPacket(udpTarget(), UDP_PORT);
   Udp.write((uint8_t *)&myData, sizeof(myData));
   int result = Udp.endPacket();
+  if (result != 1) sendFails++;
+  else lastGoodSend = millis();
 
   if (VERBOSE) {
     if (result == 1) Serial.println("UDP Packet Sent");
     else Serial.println("UDP Send Fail");
   }
+}
+
+// ---------------- Debug telemetry (port 4211) ----------------
+// One packet per second with internal health counters, so a wedge can be
+// diagnosed over the air (the COM5 serial adapter is untrustworthy).
+// Python unpack: struct.unpack("<BIIIIIIB", data)  -> 30 bytes
+//   magic 0xDD, uptime_ms, loop_count, rx_bytes, valid_packets,
+//   send_fails, free_heap, stations
+
+const uint16_t DEBUG_PORT = 4211;
+
+struct __attribute__((packed)) DebugMessage {
+  uint8_t magic;
+  uint32_t uptime_ms;
+  uint32_t loop_count;
+  uint32_t rx_bytes;
+  uint32_t valid_packets;
+  uint32_t send_fails;
+  uint32_t free_heap;
+  uint8_t stations;
+};
+
+void sendDebug() {
+  DebugMessage d;
+  d.magic = 0xDD;
+  d.uptime_ms = millis();
+  d.loop_count = loopCount;
+  d.rx_bytes = rxBytes;
+  d.valid_packets = validPackets;
+  d.send_fails = sendFails;
+  d.free_heap = ESP.getFreeHeap();
+  d.stations = WiFi.softAPgetStationNum();
+  Udp.beginPacket(udpTarget(), DEBUG_PORT);
+  Udp.write((uint8_t *)&d, sizeof(d));
+  Udp.endPacket();
 }
 
 // ---------------- Standard Arduino ----------------
@@ -349,10 +401,38 @@ void setup() {
 
 unsigned long lastTx = 0;
 const unsigned long HEARTBEAT_MS = 100;  // floor: retransmit state at least every 100 ms
-const unsigned long MIN_TX_GAP_MS = 10;  // ceiling: never more often than every 10 ms
+// Ceiling raised 10 -> 30 ms (2026-07-20): at 10 ms the box's constant display
+// refreshes drove ~100 sends/s, starving lwIP TX pbufs (~4 endPacket failures
+// per second logged all day) and eventually wedging the send path entirely.
+const unsigned long MIN_TX_GAP_MS = 30;
+
+// TX-path dead-man switch: if NO send (telemetry or debug) has succeeded for
+// this long, the lwIP send path is wedged (observed: loop alive, AP beaconing,
+// zero packets forever) -- restart the chip rather than stay silent all night.
+const unsigned long TX_DEAD_RESTART_MS = 15000;
+
+unsigned long lastDebugTx = 0;
 
 void loop() {
+  loopCount++;
   Skewered_Parser();
+
+  unsigned long dnow = millis();
+  if (dnow - lastDebugTx >= 1000) {
+    sendDebug();
+    lastDebugTx = dnow;
+  }
+
+  // dead-man switch: sends should succeed many times per second; a long
+  // stretch with zero successes means the TX path is wedged -> self-restart
+  // (grace period after boot so slow AP startup doesn't trigger it)
+  if (dnow > 30000 && lastGoodSend > 0 &&
+      dnow - lastGoodSend > TX_DEAD_RESTART_MS) {
+    ESP.restart();
+  }
+  if (lastGoodSend == 0 && dnow > 60000) {
+    ESP.restart();   // never managed a single send after a full minute
+  }
 
   // Transmit on every state change (new_data) and at least every
   // HEARTBEAT_MS regardless, but never more often than MIN_TX_GAP_MS.
