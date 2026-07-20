@@ -48,9 +48,15 @@ FLAG_NAMES = ["green", "red", "white_green", "white_red", "yellow_green",
 
 MODE_LIVE, MODE_BOUTS, MODE_TOUCHES, MODE_PLAYBACK = "live", "bouts", "touches", "playback"
 MODE_NAME = "name"
+MODE_CLUB = "club"
 ROWS_PER_PAGE = 6
 NAME_MAX = 16
 DEFAULT_NAMES = {"l": "LEFT FENCER", "r": "RIGHT FENCER"}
+LOGODIR = os.path.join(os.path.expanduser("~/skewered"), "logos")
+# logo circle centers on the 1920x1080 canvas (gap between nameplate and score)
+LOGO_CENTERS = {"l": (567, 950), "r": (1344, 950)}
+LOGO_D = 120               # diameter in canvas px
+PINNED_CLUBS = ["USA"]     # always offered in the picker (besides "None")
 
 # ---------------- shared telemetry state ----------------
 state = {"l": 0, "r": 0, "min": 0, "sec": 0, "flags": [False] * 12, "age": None}
@@ -157,6 +163,8 @@ def db_init():
             pass
     con.execute("CREATE TABLE IF NOT EXISTS names_used("
                 "name TEXT PRIMARY KEY, last_used REAL)")
+    con.execute("CREATE TABLE IF NOT EXISTS name_club("
+                "name TEXT PRIMARY KEY, club TEXT, last_used REAL)")
     con.commit()
     return con
 
@@ -164,6 +172,20 @@ def db_init():
 def write_names(l_name, r_name):
     with open(os.path.join(HOME, "fencers.txt"), "w") as fh:
         fh.write("%s\n%s\n" % (l_name, r_name))
+
+
+def read_clubs():
+    try:
+        with open(os.path.join(HOME, "clubs.txt")) as fh:
+            lines = [ln.strip() for ln in fh.readlines()] + ["", ""]
+        return (lines[0], lines[1])
+    except Exception:
+        return ("", "")
+
+
+def write_clubs(l_club, r_club):
+    with open(os.path.join(HOME, "clubs.txt"), "w") as fh:
+        fh.write("%s\n%s\n" % (l_club, r_club))
 
 
 def read_names():
@@ -443,6 +465,9 @@ def main():
     name_side = "l"            # which plate is being edited
     name_buf = ""
     name_chips = []            # quick-select names for the entry screen
+    club_side = "l"            # which logo circle is being edited
+    club_buf = ""              # picker filter text
+    clubs_now = read_clubs()
 
     DSCALE = DISP_W / float(REC_W)
 
@@ -484,6 +509,80 @@ def main():
 
     KB_ROWS = [list("QWERTYUIOP"), list("ASDFGHJKL"),
                list("ZXCVBNM") + ["'", "-", "BKSP"]]
+
+    # ---- club logos ----
+    OV_D = round(LOGO_D * SC)          # overlay diameter (720p space)
+    UI_D = 84                          # picker-grid diameter (display space)
+    logos = {}                         # club -> {"ov": Surface, "ui": Surface}
+    if os.path.isdir(LOGODIR):
+        for f in sorted(os.listdir(LOGODIR)):
+            if f.endswith(".png"):
+                img = pygame.image.load(os.path.join(LOGODIR, f)).convert_alpha()
+                logos[f[:-4]] = {
+                    "ov": pygame.transform.smoothscale(img, (OV_D, OV_D)),
+                    "ui": pygame.transform.smoothscale(img, (UI_D, UI_D))}
+
+    def make_ring(d, width, alpha):
+        s = pygame.Surface((d, d), pygame.SRCALPHA)
+        pygame.draw.circle(s, (225, 225, 235, alpha), (d // 2, d // 2),
+                           d // 2 - 1, width)
+        return s
+
+    ring_ov = make_ring(OV_D, 3, 110)      # faint empty state on the overlay
+    ring_ui = make_ring(UI_D, 3, 200)      # "None" option in the picker
+
+    def logo_ov_pos(side):
+        cx, cy = LOGO_CENTERS[side]
+        return (round(cx * SC) - OV_D // 2, round(cy * SC) - OV_D // 2)
+
+    def logo_tap_rect(side):
+        cx, cy = LOGO_CENTERS[side]
+        d = round(LOGO_D * SC * DSCALE) + 12
+        return pygame.Rect(round(cx * SC * DSCALE) - d // 2,
+                           round(cy * SC * DSCALE) + YOFF - d // 2, d, d)
+
+    def club_for_name(name):
+        row = con.execute("SELECT club FROM name_club WHERE name=?",
+                          (name,)).fetchone()
+        return row[0] if row else None
+
+    def save_club(side, club, fencer_name):
+        l, r = read_clubs()
+        if side == "l":
+            l = club
+        else:
+            r = club
+        write_clubs(l, r)
+        if fencer_name and fencer_name not in DEFAULT_NAMES.values():
+            con.execute("INSERT OR REPLACE INTO name_club(name, club,"
+                        " last_used) VALUES(?,?,?)",
+                        (fencer_name, club, time.time()))
+            con.commit()
+
+    def apply_known_club(side, fencer_name):
+        club = club_for_name(fencer_name)
+        if club is not None:
+            l, r = read_clubs()
+            if side == "l":
+                l = club
+            else:
+                r = club
+            write_clubs(l, r)
+
+    def club_options(side, filt):
+        """Ordered picker options: suggestion, None, pinned, then the rest."""
+        out = []
+        sug = club_for_name(nm_now[0 if side == "l" else 1])
+        if sug and sug in logos:
+            out.append(sug)
+        out.append("")                          # the empty / no-club option
+        for p in PINNED_CLUBS:
+            if p in logos and p not in out:
+                out.append(p)
+        rest = [c for c in sorted(logos) if c not in out]
+        if filt:
+            rest = [c for c in rest if filt.lower() in c.lower()]
+        return out + rest
 
     def load_bouts():
         rows = con.execute("""
@@ -602,6 +701,7 @@ def main():
         stale = st["age"] is None or now - st["age"] > 3
         fl = st["flags"]
         nm_now = read_names() if frames % 90 == 0 or frames == 0 else nm_now
+        clubs_now = read_clubs() if frames % 90 == 0 or frames == 0 else clubs_now
         for k in ("plate_l", "plate_r", "nplate_l", "nplate_r"):
             surf.blit(*IM[k])
         if fl[1]: surf.blit(*IM["red"])
@@ -618,6 +718,11 @@ def main():
         center_in(surf, font_score.render(str(st["r"]), True, (255, 255, 255)), IM["plate_r"])
         center_in(surf, font_name.render(nm_now[0], True, (255, 255, 255)), IM["nplate_l"])
         center_in(surf, font_name.render(nm_now[1], True, (255, 255, 255)), IM["nplate_r"])
+        for side, club in (("l", clubs_now[0]), ("r", clubs_now[1])):
+            if club and club in logos:
+                surf.blit(logos[club]["ov"], logo_ov_pos(side))
+            else:
+                surf.blit(ring_ov, logo_ov_pos(side))
         clk = font_clock.render("%d:%02d" % (st["min"], st["sec"]), True,
                                 (150, 150, 160) if stale else (255, 255, 255))
         surf.blit(clk, clk.get_rect(center=CLOCK_CENTER))
@@ -682,23 +787,44 @@ def main():
                 name_chips = load_chips(name_side)
                 mode = MODE_NAME
             elif action[0] == "key":
-                if len(name_buf) < NAME_MAX:
+                if mode == MODE_CLUB:
+                    club_buf += action[1]
+                elif len(name_buf) < NAME_MAX:
                     name_buf += action[1]
             elif action[0] == "bksp":
-                name_buf = name_buf[:-1]
+                if mode == MODE_CLUB:
+                    club_buf = club_buf[:-1]
+                else:
+                    name_buf = name_buf[:-1]
             elif action[0] == "clear":
-                name_buf = ""
+                if mode == MODE_CLUB:
+                    club_buf = ""
+                else:
+                    name_buf = ""
             elif action[0] == "pick_name":
                 save_name(name_side, action[1])
+                apply_known_club(name_side, action[1].strip()[:NAME_MAX])
                 nm_now = read_names()
+                clubs_now = read_clubs()
                 mode = MODE_LIVE
             elif action[0] == "name_ok":
                 if save_name(name_side, name_buf):
+                    apply_known_club(name_side, name_buf.strip()[:NAME_MAX])
                     nm_now = read_names()
+                    clubs_now = read_clubs()
                     mode = MODE_LIVE
                 else:
                     flash = ("Name is empty", now + 2)
             elif action[0] == "name_cancel":
+                mode = MODE_LIVE
+            elif action[0] == "edit_club":
+                club_side = action[1]
+                club_buf = ""
+                mode = MODE_CLUB
+            elif action[0] == "pick_club":
+                fencer = nm_now[0 if club_side == "l" else 1]
+                save_club(club_side, action[1], fencer)
+                clubs_now = read_clubs()
                 mode = MODE_LIVE
 
         # a real touch at the strip interrupts any replay
@@ -718,6 +844,9 @@ def main():
             # invisible tap zones over the nameplates -> name entry
             buttons.append(Button(plate_rect("nplate_l"), "", ("edit_name", "l")))
             buttons.append(Button(plate_rect("nplate_r"), "", ("edit_name", "r")))
+            # tap zones over the club logo circles -> logo picker
+            buttons.append(Button(logo_tap_rect("l"), "", ("edit_club", "l")))
+            buttons.append(Button(logo_tap_rect("r"), "", ("edit_club", "r")))
             if rec.active:
                 pygame.draw.circle(screen, (255, 40, 40), (14, 22), 7)
                 screen.blit(font_sml.render(
@@ -788,6 +917,40 @@ def main():
             buttons.append(Button((8, 394, 150, 78), "CLEAR", ("clear",)))
             buttons.append(Button((166, 394, 420, 78), "SPACE", ("key", " ")))
             buttons.append(Button((594, 394, 198, 78), "OK", ("name_ok",)))
+
+        elif mode == MODE_CLUB:
+            side_label = "LEFT" if club_side == "l" else "RIGHT"
+            screen.blit(font_head.render("%s club:" % side_label, True,
+                                         (235, 235, 245)), (8, 8))
+            filt = club_buf + ("_" if (frames // 15) % 2 == 0 else " ")
+            screen.blit(font_head.render(filt, True, (255, 255, 160)), (200, 8))
+            buttons.append(Button((690, 4, 106, 38), "CANCEL", ("name_cancel",)))
+            options = club_options(club_side, club_buf)[:12]
+            for i, club in enumerate(options):
+                cx = 6 + (i % 6) * 132
+                cy = 46 + (i // 6) * 112
+                b = Button((cx, cy, 128, 104), "", ("pick_club", club))
+                if club and club in logos:
+                    screen.blit(logos[club]["ui"], (cx + 22, cy))
+                    label = club
+                else:
+                    screen.blit(ring_ui, (cx + 22, cy))
+                    label = "None"
+                t = font_sml.render(label[:17], True, (210, 215, 235))
+                screen.blit(t, t.get_rect(center=(cx + 64, cy + 94)))
+                buttons.append(b)
+            for ri, row in enumerate(KB_ROWS):
+                ky = 274 + ri * 50
+                kx0 = (800 - len(row) * 80) // 2
+                for ci, key in enumerate(row):
+                    kx = kx0 + ci * 80
+                    if key == "BKSP":
+                        buttons.append(Button((kx, ky, 76, 46), "<-", ("bksp",)))
+                    else:
+                        buttons.append(Button((kx, ky, 76, 46), key,
+                                              ("key", key)))
+            buttons.append(Button((8, 426, 190, 48), "CLEAR", ("clear",)))
+            buttons.append(Button((206, 426, 586, 48), "SPACE", ("key", " ")))
 
         elif mode == MODE_PLAYBACK:
             pbuf = play["proc"].stdout.read(PFRAME)

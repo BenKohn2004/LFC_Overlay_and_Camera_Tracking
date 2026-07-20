@@ -27,6 +27,12 @@ box state over Wi-Fi.
   real touch at the strip interrupts any replay.
 - **Name entry** — tap a nameplate for an on-screen keyboard with quick-select
   chips of recently used names.
+- **Club logos** — a circular club logo sits between each nameplate and score
+  plate (burned into recordings like the rest of the overlay). Tap it to open
+  a picker: the club last associated with that fencer's name is offered first,
+  "no club" and a US-flag option are always available, and typing filters the
+  grid by club name. Picking a fencer name whose club is known applies the
+  logo automatically.
 - **Transmitter health telemetry** — the companion sketch broadcasts a
   1 Hz debug beacon (uptime, loop rate, serial byte counters, send failures,
   free heap) on port 4211; `debug_logger.py` records it so radio problems can
@@ -41,7 +47,16 @@ box state over Wi-Fi.
 | `start_station.sh` | Boot launcher: waits for the webcam, starts logger + station |
 | `skewered-station.desktop` | XDG autostart entry (`~/.config/autostart/`) |
 | `udp_listen.py`, `udp_watch.py` | Small debugging listeners for the telemetry |
+| `make_logos.py` | Turns club logo images into uniform 128x128 circles |
 | `assets/` | Overlay art (same images the OBS overlay uses) |
+
+**Club logos:** drop images into `~/skewered/logos_src/` on the Pi — the
+filename (minus extension) becomes the club name — and run
+`python3 make_logos.py`. Each image is composited on a white disc, circled
+with an antialiased mask and a thin ring, and written to `~/skewered/logos/`;
+the station picks them up on next start. Near-square images fill the circle;
+wide/tall ones are scaled to fit inside it so text is not clipped. (Logo image
+files are not included in this repo — use your own clubs' art.)
 
 ## Setup (Raspberry Pi OS, Wayland desktop)
 
