@@ -37,6 +37,13 @@ box state over Wi-Fi.
   1 Hz debug beacon (uptime, loop rate, serial byte counters, send failures,
   free heap) on port 4211; `debug_logger.py` records it so radio problems can
   be diagnosed after the fact.
+- **YouTube upload** — from the bout browser, `UPLOAD ALL` (or per-bout
+  `UPLOAD`) cuts each bout (first touch to last, capped at 20 min, via stream
+  copy) and uploads it. A `WIFI` button scans/joins an internet network on the
+  touchscreen (the box AP has no internet, so uploading is an after-practice
+  step). Videos are titled `Name vs Name - date (score)`, described with the
+  touch list, and uploaded **private**. A per-bout `youtube_id` prevents
+  re-uploads, so `UPLOAD ALL` only sends new bouts.
 
 ## Files
 
@@ -48,6 +55,8 @@ box state over Wi-Fi.
 | `skewered-station.desktop` | XDG autostart entry (`~/.config/autostart/`) |
 | `udp_listen.py`, `udp_watch.py` | Small debugging listeners for the telemetry |
 | `make_logos.py` | Turns club logo images into uniform 128x128 circles |
+| `yt_upload.py` | Stdlib-only resumable YouTube uploader (no pip deps) |
+| `oauth_link.py` | One-time OAuth helper (run on a PC with a browser) |
 | `assets/` | Overlay art (same images the OBS overlay uses) |
 
 **Club logos:** drop images into `~/skewered/logos_src/` on the Pi — the
@@ -78,6 +87,30 @@ Exit: ESC, or press-and-hold the live view for 2 seconds.
 
 Fencer names live in `~/skewered/fencers.txt` (line 1 = left, line 2 = right);
 the on-screen editor maintains it for you.
+
+## YouTube upload setup (one-time)
+
+The uploader needs an OAuth refresh token. It is stdlib-only (no
+`google-api-python-client`), which matters because the Pi has no internet for
+`pip install` except during uploads.
+
+1. In the [Google Cloud console](https://console.cloud.google.com): create a
+   project, enable **YouTube Data API v3**, and configure the **OAuth consent
+   screen** as *External*. **Publish the app to "In production"** — in
+   "Testing" mode Google returns `403 access_denied` and expires refresh tokens
+   after 7 days.
+2. Create an **OAuth client ID** of type **Desktop app** and download its JSON.
+3. On a machine with a browser, run `oauth_link.py` (it reads the newest
+   `client_secret_*.json` from your Downloads folder), click through the consent
+   screen (`Advanced -> Go to ... (unsafe)` is expected for an unverified app),
+   and it writes `yt_token.json`.
+4. Copy `yt_token.json` next to `station.py` on the Pi (`chmod 600`).
+
+Notes: uploads are **private** and cannot be public until the project passes
+YouTube's (free) API audit. Default quota allows ~6 uploads/day. Phone-verify
+the channel (youtube.com/verify) or videos over 15 min are rejected. The
+`client_secret_*.json` and `yt_token.json` are secrets — keep them out of
+version control.
 
 ## Hardware notes
 

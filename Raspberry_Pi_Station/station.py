@@ -24,6 +24,11 @@ import time
 
 import pygame
 
+try:
+    import yt_upload
+except ImportError:          # station still runs without the uploader
+    yt_upload = None
+
 # ---------------- config ----------------
 FMT = "<B6s4I12?32s"
 UDP_PORT = 4210
@@ -52,7 +57,15 @@ MODE_CLUB = "club"
 ROWS_PER_PAGE = 6
 NAME_MAX = 16
 DEFAULT_NAMES = {"l": "LEFT FENCER", "r": "RIGHT FENCER"}
+MODE_WIFI = "wifi"
+MODE_WIFIPW = "wifipw"
 LOGODIR = os.path.join(os.path.expanduser("~/skewered"), "logos")
+UPLOAD_DIR = os.path.join(os.path.expanduser("~/skewered"), "uploads")
+TOKEN_PATH = os.path.join(os.path.expanduser("~/skewered"), "yt_token.json")
+UPLOAD_PRE = 4.0            # lead-in before a bout's first touch
+UPLOAD_POST = 4.0           # tail after its last touch
+UPLOAD_MAX_SECS = 1200      # 20-minute cap per uploaded bout
+BOX_SSID = "SkeweredNet"
 # logo circle centers on the 1920x1080 canvas (gap between nameplate and score)
 LOGO_CENTERS = {"l": (567, 950), "r": (1344, 950)}
 LOGO_D = 120               # diameter in canvas px
@@ -156,7 +169,7 @@ def db_init():
     CREATE TABLE IF NOT EXISTS state_log(
         ts REAL, session_id INT, l INT, r INT, min INT, sec INT, flags TEXT);
     """)
-    for col in ("l_name", "r_name"):
+    for col in ("l_name", "r_name", "youtube_id", "upload_path"):
         try:
             con.execute("ALTER TABLE bouts ADD COLUMN %s TEXT DEFAULT ''" % col)
         except sqlite3.OperationalError:
@@ -331,11 +344,148 @@ class Recorder:
                 os.remove(vids[0])
                 continue
             try:
-                os.remove(row[1])
+                os.remove(rec_path(row[1]))
             except OSError:
                 pass
             self.con.execute("UPDATE files SET deleted=1 WHERE id=?", (row[0],))
             self.con.commit()
+
+
+def rec_path(fn):
+    """files-table names may be bare (ffmpeg's segment list strips the dir)."""
+    return fn if os.path.isabs(fn) else os.path.join(RECDIR, fn)
+
+
+def bout_video_range(con, bout_id):
+    """(session_id, start_offset, end_offset) spanning first to last touch."""
+    row = con.execute(
+        "SELECT session_id, MIN(session_offset), MAX(session_offset) FROM"
+        " events WHERE bout_id=? AND type='touch'", (bout_id,)).fetchone()
+    if not row or row[1] is None:
+        return None
+    sid, first, last = row
+    start = max(0.0, first - UPLOAD_PRE)
+    end = min(last + UPLOAD_POST, start + UPLOAD_MAX_SECS)
+    return (sid, start, end)
+
+
+def export_bout(con, rec, bout_id):
+    """Cut one bout (first to last touch) into UPLOAD_DIR via stream copy.
+    Returns (path, None) or (None, reason)."""
+    rng = bout_video_range(con, bout_id)
+    if rng is None:
+        return None, "no touches"
+    sid, start, end = rng
+    segs = []
+    if rec.active and rec.session_id == sid:
+        for i, p in enumerate(rec.session_files()):
+            segs.append((i * SEGMENT_SECS, (i + 1) * SEGMENT_SECS, p))
+    else:
+        for idx, fn, so, eo, deleted in con.execute(
+                "SELECT idx, filename, start_offset, end_offset, deleted FROM"
+                " files WHERE session_id=? ORDER BY idx", (sid,)):
+            if deleted or not os.path.exists(rec_path(fn)):
+                if eo > start and so < end:
+                    return None, "footage deleted"
+                continue
+            segs.append((so, eo, rec_path(fn)))
+    use = [s for s in segs if s[1] > start and s[0] < end]
+    if not use:
+        return None, "footage missing"
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    out = os.path.join(UPLOAD_DIR, "bout_%04d.mp4" % bout_id)
+    lst = os.path.join(UPLOAD_DIR, "concat_%d.txt" % bout_id)
+    with open(lst, "w") as fh:
+        for so, eo, fn in use:
+            fh.write("file '%s'\n" % fn.replace("'", "'\\''"))
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe",
+             "0", "-i", lst, "-ss", "%.2f" % (start - use[0][0]),
+             "-t", "%.2f" % (end - start), "-c", "copy",
+             "-movflags", "+faststart", out],
+            capture_output=True, timeout=300)
+    finally:
+        try:
+            os.remove(lst)
+        except OSError:
+            pass
+    if r.returncode != 0 or not os.path.exists(out):
+        return None, "cut failed"
+    con.execute("UPDATE bouts SET upload_path=? WHERE id=?", (out, bout_id))
+    con.commit()
+    return out, None
+
+
+def bout_upload_title(con, bout_id):
+    row = con.execute(
+        "SELECT start_ts, l_name, r_name,"
+        " (SELECT e.l_after FROM events e WHERE e.bout_id=bouts.id AND"
+        "  e.type='touch' ORDER BY e.id DESC LIMIT 1),"
+        " (SELECT e.r_after FROM events e WHERE e.bout_id=bouts.id AND"
+        "  e.type='touch' ORDER BY e.id DESC LIMIT 1)"
+        " FROM bouts WHERE id=?", (bout_id,)).fetchone()
+    ts, ln, rn, lf, rf = row
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+    score = " (%d-%d)" % (lf, rf) if lf is not None else ""
+    return "%s vs %s - %s%s" % (ln or "Left", rn or "Right", when, score)
+
+
+def bout_description(con, bout_id):
+    rows = con.execute(
+        "SELECT l_after, r_after, detail FROM events WHERE bout_id=? AND"
+        " type='touch' ORDER BY id", (bout_id,)).fetchall()
+    lines = ["Touches:"]
+    for i, (l, r, d) in enumerate(rows, 1):
+        lines.append("%d.  %d - %d   (%s)" % (i, l, r, d.replace("_", " ")))
+    lines.append("")
+    lines.append("Recorded automatically by the fencing strip station.")
+    return "\n".join(lines)
+
+
+def internet_up():
+    try:
+        socket.create_connection(("8.8.8.8", 53), timeout=3).close()
+        return True
+    except OSError:
+        return False
+
+
+def wifi_scan():
+    """[(ssid, signal, secured)] sorted by signal, deduped, box AP excluded."""
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY",
+             "dev", "wifi", "list", "--rescan", "yes"],
+            capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        return []
+    nets = {}
+    for line in r.stdout.splitlines():
+        parts = line.rsplit(":", 2)
+        if len(parts) != 3 or not parts[0] or parts[0] == BOX_SSID:
+            continue
+        ssid, sig, sec = parts[0], int(parts[1] or 0), parts[2]
+        if ssid not in nets or nets[ssid][0] < sig:
+            nets[ssid] = (sig, bool(sec.strip()))
+    return sorted(((s, v[0], v[1]) for s, v in nets.items()),
+                  key=lambda x: -x[1])
+
+
+def wifi_connect(ssid, password):
+    cmd = ["sudo", "-n", "nmcli", "dev", "wifi", "connect", ssid]
+    if password:
+        cmd += ["password", password]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+        return r.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def reconnect_box():
+    subprocess.run(["sudo", "-n", "nmcli", "con", "up", BOX_SSID],
+                   capture_output=True, timeout=30)
 
 
 def clip_source(con, rec, session_id, session_offset):
@@ -352,9 +502,9 @@ def clip_source(con, rec, session_id, session_offset):
         "SELECT filename, start_offset, deleted FROM files WHERE session_id=?"
         " AND start_offset<=? AND end_offset>?",
         (session_id, start, start)).fetchone()
-    if not row or row[2] or not os.path.exists(row[0]):
+    if not row or row[2] or not os.path.exists(rec_path(row[0])):
         return None, 0
-    return row[0], start - row[1]
+    return rec_path(row[0]), start - row[1]
 
 
 # ---------------- overlay ----------------
@@ -468,6 +618,112 @@ def main():
     club_side = "l"            # which logo circle is being edited
     club_buf = ""              # picker filter text
     clubs_now = read_clubs()
+    wifi_nets = []             # scan results for the picker
+    wifi_page = 0
+    wifi_target = ""           # SSID awaiting a password
+    wifi_pw = ""
+    wifi_shift = False
+    wifi_sym = False
+    wifi_scan_busy = [False]
+    export_job = {"active": False, "done": 0, "total": 0, "ok": 0,
+                  "fail": 0, "finished": False}
+    upload_job = {"active": False, "done": 0, "total": 0, "ok": 0, "fail": 0,
+                  "finished": False, "current": "", "pct": 0, "error": ""}
+
+    def start_exports(bout_ids):
+        if export_job["active"] or not bout_ids:
+            return
+        export_job.update(active=True, done=0, total=len(bout_ids), ok=0,
+                          fail=0, finished=False)
+
+        def worker():
+            c2 = sqlite3.connect(DBPATH, timeout=10)
+            for bid in bout_ids:
+                path, err = export_bout(c2, rec, bid)
+                export_job["done"] += 1
+                if path:
+                    export_job["ok"] += 1
+                else:
+                    export_job["fail"] += 1
+            c2.close()
+            export_job["active"] = False
+            export_job["finished"] = True
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_wifi_scan():
+        wifi_scan_busy[0] = True
+
+        def worker():
+            nets = wifi_scan()
+            wifi_nets[:] = nets
+            wifi_scan_busy[0] = False
+        threading.Thread(target=worker, daemon=True).start()
+
+    def pending_upload_bouts():
+        return [(r[0], r[1]) for r in con.execute(
+            "SELECT id, upload_path FROM bouts WHERE youtube_id='' AND"
+            " upload_path<>'' ORDER BY id")]
+
+    def start_uploads():
+        if upload_job["active"] or yt_upload is None:
+            return False
+        items = pending_upload_bouts()
+        items = [(b, p) for (b, p) in items if os.path.exists(p)]
+        if not items:
+            return False
+        upload_job.update(active=True, done=0, total=len(items), ok=0,
+                          fail=0, finished=False, current="", pct=0, error="")
+
+        def worker():
+            c2 = sqlite3.connect(DBPATH, timeout=10)
+            for bid, path in items:
+                title = bout_upload_title(c2, bid)
+                upload_job["current"] = title
+                upload_job["pct"] = 0
+
+                def prog(sent, total, _j=upload_job):
+                    _j["pct"] = int(sent * 100 / max(1, total))
+
+                try:
+                    vid = yt_upload.upload(
+                        path, title, description=bout_description(c2, bid),
+                        token_path=TOKEN_PATH, progress=prog)
+                    c2.execute("UPDATE bouts SET youtube_id=? WHERE id=?",
+                               (vid or "uploaded", bid))
+                    c2.commit()
+                    upload_job["ok"] += 1
+                    try:
+                        os.remove(path)     # cut file no longer needed
+                    except OSError:
+                        pass
+                except Exception as e:
+                    upload_job["error"] = str(e)[:70]
+                    upload_job["fail"] += 1
+                    upload_job["done"] += 1
+                    if "quota" in str(e).lower():
+                        break               # stop; resume another day
+                    continue
+                upload_job["done"] += 1
+            c2.close()
+            upload_job["active"] = False
+            upload_job["finished"] = True
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def uploadable_bouts():
+        return [r[0] for r in con.execute(
+            "SELECT b.id FROM bouts b WHERE b.youtube_id='' AND EXISTS"
+            " (SELECT 1 FROM events e WHERE e.bout_id=b.id AND"
+            "  e.type='touch') ORDER BY b.id")]
+
+    def wifi_kb_rows():
+        if wifi_sym:
+            return [list("1234567890"), list("!@#$%^&*()"),
+                    list("-_=+[]{}:;"), list("'\",.<>/?\\|")]
+        rows = [list("qwertyuiop"), list("asdfghjkl"), list("zxcvbnm")]
+        if wifi_shift:
+            rows = [[c.upper() for c in r] for r in rows]
+        return [list("1234567890")] + rows
 
     DSCALE = DISP_W / float(REC_W)
 
@@ -596,17 +852,21 @@ def main():
                    (SELECT MIN(b2.id) FROM bouts b2
                      WHERE b2.session_id=b.session_id),
                    (SELECT COUNT(*) FROM bouts b3
-                     WHERE b3.session_id=b.session_id)
+                     WHERE b3.session_id=b.session_id),
+                   b.youtube_id
             FROM bouts b ORDER BY b.id DESC""").fetchall()
         out = []
-        for (bid, sid, ts, ln, rn, n, lf, rf, first_id, nbouts) in rows:
+        for (bid, sid, ts, ln, rn, n, lf, rf, first_id, nbouts, ytid) in rows:
             when = time.strftime("%b %d %H:%M", time.localtime(ts))
             names = "%s vs %s" % (ln or "LEFT", rn or "RIGHT")
             if bid == first_id and nbouts > 1:
                 names += "  (warm-up)"
             score = "%d - %d" % (lf, rf) if lf is not None else "-"
+            mark = ("   [skipped]" if ytid == "skipped"
+                    else ("   [uploaded]" if ytid else ""))
             out.append({"bout_id": bid, "title": names,
-                        "sub": "%s   %d touches   final %s" % (when, n, score)})
+                        "sub": "%s   %d touches   final %s%s"
+                               % (when, n, score, mark)})
         return out
 
     def load_touches(bout_id):
@@ -794,11 +1054,15 @@ def main():
             elif action[0] == "bksp":
                 if mode == MODE_CLUB:
                     club_buf = club_buf[:-1]
+                elif mode == MODE_WIFIPW:
+                    wifi_pw = wifi_pw[:-1]
                 else:
                     name_buf = name_buf[:-1]
             elif action[0] == "clear":
                 if mode == MODE_CLUB:
                     club_buf = ""
+                elif mode == MODE_WIFIPW:
+                    wifi_pw = ""
                 else:
                     name_buf = ""
             elif action[0] == "pick_name":
@@ -821,6 +1085,68 @@ def main():
                 club_side = action[1]
                 club_buf = ""
                 mode = MODE_CLUB
+            elif action[0] == "upload_all":
+                ids = uploadable_bouts()
+                if ids:
+                    start_exports(ids)
+                    flash = ("Preparing %d bout video(s)..." % len(ids), now + 3)
+                else:
+                    flash = ("Nothing new to upload", now + 2)
+            elif action[0] == "upload_one":
+                bid = action[1]
+                already = con.execute("SELECT youtube_id FROM bouts WHERE"
+                                      " id=?", (bid,)).fetchone()
+                if already and already[0]:
+                    flash = ("Already uploaded", now + 2)
+                else:
+                    start_exports([bid])
+                    flash = ("Preparing bout video...", now + 3)
+            elif action[0] == "wifi_open":
+                wifi_page = 0
+                start_wifi_scan()
+                mode = MODE_WIFI
+            elif action[0] == "wifi_rescan":
+                if not wifi_scan_busy[0]:
+                    start_wifi_scan()
+            elif action[0] == "wifi_page":
+                wifi_page = max(0, min(wifi_page + action[1],
+                                       max(0, (len(wifi_nets) - 1)
+                                           // ROWS_PER_PAGE)))
+            elif action[0] == "wifi_pick":
+                ssid, secured = action[1]
+                if secured:
+                    wifi_target, wifi_pw = ssid, ""
+                    wifi_shift = wifi_sym = False
+                    mode = MODE_WIFIPW
+                else:
+                    flash = ("Connecting to %s..." % ssid, now + 30)
+                    ok = wifi_connect(ssid, None)
+                    flash = (("Connected to %s" % ssid) if ok else
+                             "Connection failed", now + 3)
+                    mode = MODE_BOUTS
+            elif action[0] == "wifi_ok":
+                flash = ("Connecting to %s..." % wifi_target, now + 45)
+                ok = wifi_connect(wifi_target, wifi_pw)
+                if ok and start_uploads():
+                    flash = ("Connected - uploading...", now + 5)
+                elif ok:
+                    flash = ("Connected to %s" % wifi_target, now + 4)
+                else:
+                    flash = ("Wrong password or connection failed", now + 4)
+                mode = MODE_BOUTS if ok else MODE_WIFI
+            elif action[0] == "wifi_box":
+                reconnect_box()
+                flash = ("Reconnecting to box wifi...", now + 3)
+                mode = MODE_LIVE
+            elif action[0] == "wifi_cancel":
+                mode = MODE_WIFI if mode == MODE_WIFIPW else MODE_BOUTS
+            elif action[0] == "wkey":
+                if len(wifi_pw) < 63:
+                    wifi_pw += action[1]
+            elif action[0] == "wshift":
+                wifi_shift = not wifi_shift
+            elif action[0] == "wsym":
+                wifi_sym = not wifi_sym
             elif action[0] == "pick_club":
                 fencer = nm_now[0 if club_side == "l" else 1]
                 save_club(club_side, action[1], fencer)
@@ -831,6 +1157,33 @@ def main():
         if mode == MODE_PLAYBACK and new_touch:
             stop_playback(play)
             mode, play = MODE_LIVE, None
+
+        # export batch finished -> report, then route to wifi / youtube setup
+        if export_job["finished"]:
+            export_job["finished"] = False
+            msg = "Prepared %d video(s)" % export_job["ok"]
+            if export_job["fail"]:
+                msg += ", %d failed" % export_job["fail"]
+            if export_job["ok"] and not os.path.exists(TOKEN_PATH):
+                flash = (msg + " - YouTube not linked yet", now + 5)
+            elif export_job["ok"] and not internet_up():
+                flash = (msg + " - pick a wifi network", now + 4)
+                wifi_page = 0
+                start_wifi_scan()
+                mode = MODE_WIFI
+            elif export_job["ok"] and start_uploads():
+                flash = (msg + " - uploading...", now + 4)
+            else:
+                flash = (msg, now + 4)
+
+        # upload batch finished
+        if upload_job["finished"]:
+            upload_job["finished"] = False
+            m = "Uploaded %d video(s)" % upload_job["ok"]
+            if upload_job["fail"]:
+                m += " - %d failed (%s)" % (upload_job["fail"],
+                                            upload_job["error"])
+            flash = (m, now + 8)
 
         # ---------- draw current mode ----------
         screen.fill((0, 0, 0))
@@ -863,6 +1216,25 @@ def main():
             back = ("back_live",) if mode == MODE_BOUTS else ("back_bouts",)
             screen.blit(font_head.render(title, True, (235, 235, 245)), (108, 10))
             buttons.append(Button((4, 4, 96, 40), "BACK", back))
+            if upload_job["active"]:
+                screen.blit(font_sml.render(
+                    "Uploading %d/%d  %d%%" % (upload_job["done"] + 1,
+                                               upload_job["total"],
+                                               upload_job["pct"]),
+                    True, (140, 235, 150)), (540, 18))
+            elif export_job["active"]:
+                screen.blit(font_sml.render(
+                    "Cutting %d/%d..." % (export_job["done"],
+                                          export_job["total"]),
+                    True, (255, 210, 120)), (560, 18))
+            elif mode == MODE_BOUTS:
+                buttons.append(Button((430, 4, 104, 40), "WIFI",
+                                      ("wifi_open",)))
+                buttons.append(Button((560, 4, 172, 40), "UPLOAD ALL",
+                                      ("upload_all",)))
+            else:
+                buttons.append(Button((560, 4, 172, 40), "UPLOAD",
+                                      ("upload_one", cur_bout["bout_id"])))
             y = 52
             for r in rows[page * ROWS_PER_PAGE:(page + 1) * ROWS_PER_PAGE]:
                 avail = r.get("available", True)
@@ -951,6 +1323,69 @@ def main():
                                               ("key", key)))
             buttons.append(Button((8, 426, 190, 48), "CLEAR", ("clear",)))
             buttons.append(Button((206, 426, 586, 48), "SPACE", ("key", " ")))
+
+        elif mode == MODE_WIFI:
+            screen.blit(font_head.render("Wi-Fi networks", True,
+                                         (235, 235, 245)), (108, 10))
+            buttons.append(Button((4, 4, 96, 40), "BACK", ("wifi_cancel",)))
+            buttons.append(Button((470, 4, 110, 40), "RESCAN",
+                                  ("wifi_rescan",)))
+            buttons.append(Button((590, 4, 202, 40), "BOX WIFI",
+                                  ("wifi_box",)))
+            if wifi_scan_busy[0]:
+                screen.blit(font_row.render("Scanning...", True,
+                                            (150, 150, 160)), (16, 70))
+            else:
+                y = 52
+                for (ssid, sig, secured) in wifi_nets[
+                        wifi_page * ROWS_PER_PAGE:
+                        (wifi_page + 1) * ROWS_PER_PAGE]:
+                    b = Button((4, y, 728, 60), "",
+                               ("wifi_pick", (ssid, secured)))
+                    b.draw(screen, font_row)
+                    screen.blit(font_row.render(ssid[:34], True,
+                                                (235, 235, 245)), (16, y + 6))
+                    screen.blit(font_sml.render(
+                        "signal %d   %s" % (sig, "secured" if secured
+                                            else "open"),
+                        True, (160, 165, 190)), (16, y + 36))
+                    buttons.append(b)
+                    y += 64
+                if not wifi_nets:
+                    screen.blit(font_row.render("No networks found", True,
+                                                (150, 150, 160)), (16, 70))
+                npages = max(1, (len(wifi_nets) + ROWS_PER_PAGE - 1)
+                             // ROWS_PER_PAGE)
+                if npages > 1:
+                    buttons.append(Button((740, 52, 56, 180), "UP",
+                                          ("wifi_page", -1),
+                                          enabled=wifi_page > 0))
+                    buttons.append(Button((740, 244, 56, 180), "DN",
+                                          ("wifi_page", 1),
+                                          enabled=wifi_page < npages - 1))
+
+        elif mode == MODE_WIFIPW:
+            screen.blit(font_ui.render("Password for %s:" % wifi_target[:24],
+                                       True, (235, 235, 245)), (8, 8))
+            pw = wifi_pw + ("_" if (frames // 15) % 2 == 0 else " ")
+            screen.blit(font_ui.render(pw[-40:], True, (255, 255, 160)),
+                        (8, 44))
+            buttons.append(Button((690, 4, 106, 36), "CANCEL",
+                                  ("wifi_cancel",)))
+            for ri, row in enumerate(wifi_kb_rows()):
+                ky = 84 + ri * 66
+                kx0 = (800 - len(row) * 80) // 2
+                for ci, key in enumerate(row):
+                    buttons.append(Button((kx0 + ci * 80, ky, 76, 62), key,
+                                          ("wkey", key)))
+            ky = 84 + 4 * 66
+            buttons.append(Button((4, ky, 100, 62), "SHIFT", ("wshift",)))
+            buttons.append(Button((112, ky, 100, 62),
+                                  "abc" if wifi_sym else "?#+", ("wsym",)))
+            buttons.append(Button((220, ky, 240, 62), "SPACE", ("wkey", " ")))
+            buttons.append(Button((468, ky, 100, 62), "<-", ("bksp",)))
+            buttons.append(Button((576, ky, 100, 62), "CLR", ("clear",)))
+            buttons.append(Button((684, ky, 110, 62), "OK", ("wifi_ok",)))
 
         elif mode == MODE_PLAYBACK:
             pbuf = play["proc"].stdout.read(PFRAME)
