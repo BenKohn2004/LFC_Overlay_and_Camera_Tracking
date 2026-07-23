@@ -1,6 +1,5 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
-#include <SoftwareSerial.h>
 
 // ---------------- Configuration ----------------
 #define BOX_NAME "Strip10"
@@ -36,8 +35,15 @@ IPAddress udpTarget() {
 
 WiFiUDP Udp;
 
-// SoftwareSerial for the RS-485 Converter
-SoftwareSerial BoxSerial(D7, D6);
+// Box RS-485 input on the HARDWARE UART, not bit-banged SoftwareSerial.
+// SoftwareSerial at 115200 starved interrupts under live box data and tripped
+// the ESP8266 hardware watchdog (reset every 1-2 min; confirmed via the debug
+// beacon's rst_reason = HW-watchdog while the loop was still running at full
+// speed). After Serial.swap() UART0 RX moves to GPIO13 = D7 -- exactly where
+// the converter's TTL RX is already wired -- so NO rewiring is needed. The
+// trade-off is losing USB serial (we rely on the WiFi debug beacon; this
+// board's FTDI was counterfeit anyway).
+HardwareSerial &BoxSerial = Serial;
 
 // ---------------- UDP Payload ----------------
 // Same packed layout as the ESP-NOW version: 67 bytes total.
@@ -324,11 +330,15 @@ void sendUdpUpdate() {
 // ---------------- Debug telemetry (port 4211) ----------------
 // One packet per second with internal health counters, so a wedge can be
 // diagnosed over the air (the COM5 serial adapter is untrustworthy).
-// Python unpack: struct.unpack("<BIIIIIIB", data)  -> 30 bytes
+// Python unpack: struct.unpack("<B6IBB", data)  -> 27 bytes
 //   magic 0xDD, uptime_ms, loop_count, rx_bytes, valid_packets,
-//   send_fails, free_heap, stations
+//   send_fails, free_heap, stations, rst_reason
+// rst_reason (ESP8266 rst_info.reason): 0=power-on 1=HW watchdog
+//   2=exception/crash 3=SW watchdog 4=ESP.restart() (our dead-man)
+//   5=deep-sleep wake 6=external reset pin. Brownouts usually show as 0 or 6.
 
 const uint16_t DEBUG_PORT = 4211;
+uint8_t g_rst_reason = 0;      // captured once in setup()
 
 struct __attribute__((packed)) DebugMessage {
   uint8_t magic;
@@ -339,6 +349,7 @@ struct __attribute__((packed)) DebugMessage {
   uint32_t send_fails;
   uint32_t free_heap;
   uint8_t stations;
+  uint8_t rst_reason;
 };
 
 void sendDebug() {
@@ -351,6 +362,7 @@ void sendDebug() {
   d.send_fails = sendFails;
   d.free_heap = ESP.getFreeHeap();
   d.stations = WiFi.softAPgetStationNum();
+  d.rst_reason = g_rst_reason;
   Udp.beginPacket(udpTarget(), DEBUG_PORT);
   Udp.write((uint8_t *)&d, sizeof(d));
   Udp.endPacket();
@@ -359,8 +371,16 @@ void sendDebug() {
 // ---------------- Standard Arduino ----------------
 
 void setup() {
+  g_rst_reason = ESP.getResetInfoPtr()->reason;   // why the last boot ended
+  // The RS-485/TTL converter's output needs the RX pin pulled up to idle high
+  // (SoftwareSerial did this automatically; the bare UART does not, so rx read
+  // as a dead line). Set the pull-up on GPIO13 BEFORE the swap: doing it after
+  // re-muxes the pin to plain GPIO and disconnects the UART. The pull-up bit
+  // survives the swap; the function bits get set to UART RX by swap().
+  pinMode(13, INPUT_PULLUP);
   Serial.begin(115200);
-  BoxSerial.begin(115200);
+  Serial.swap();   // move UART0 to GPIO15(TX)/GPIO13(RX=D7) -> reads the box
+  // (BoxSerial is a reference to Serial, so it is already started + swapped)
 
 #if USE_SOFTAP
   WiFi.mode(WIFI_AP);
