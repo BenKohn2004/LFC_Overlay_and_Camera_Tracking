@@ -1,0 +1,8 @@
+# These files are consumed on Linux (Raspberry Pi). A CRLF checkout on Windows
+# breaks them in ways that are annoying to diagnose: bash reports
+# "\r: command not found", and systemd silently mis-parses unit directives.
+# Pin them to LF regardless of the platform they are checked out on.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.desktop   text eol=lf
+*.py        text eol=lf

@@ -1,0 +1,22 @@
+[Unit]
+Description=Skewered Wemos debug telemetry logger (UDP 4211)
+Documentation=https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking
+# Deliberately NOT After=network-online.target: binding 0.0.0.0 succeeds while
+# the link is still down, and the point of running this from boot is to capture
+# the startup window -- including how long the Pi takes to associate with the
+# transmitter's AP. Waiting for the network would hide exactly that.
+After=local-fs.target
+# Never give up restarting; this is an instrument, not a service anyone depends on.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ben
+Group=ben
+WorkingDirectory=/home/ben/skewered
+ExecStart=/usr/bin/python3 -u /home/ben/skewered/debug_logger.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

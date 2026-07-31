@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# Runtime artefacts on the Pi (kept out of version control deliberately)
+*.log
+*.log.1
+yt_token.json
+client_secret_*.json

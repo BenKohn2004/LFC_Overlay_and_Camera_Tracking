@@ -50,8 +50,9 @@ box state over Wi-Fi.
 | File | Purpose |
 |---|---|
 | `station.py` | The whole station: capture, overlay, recording, database, touch UI |
-| `debug_logger.py` | Logs the transmitter's debug beacon (port 4211) |
-| `start_station.sh` | Boot launcher: waits for the webcam, starts logger + station |
+| `debug_logger.py` | Logs the transmitter's debug beacon (port 4211) + Wi-Fi association |
+| `skewered-debug-logger.service` | systemd unit so the logger runs from boot, not from the desktop session |
+| `start_station.sh` | Boot launcher: waits for the webcam, starts the station |
 | `skewered-station.desktop` | XDG autostart entry (`~/.config/autostart/`) |
 | `udp_listen.py`, `udp_watch.py` | Small debugging listeners for the telemetry |
 | `make_logos.py` | Turns club logo images into uniform 128x128 circles |
@@ -78,7 +79,14 @@ files are not included in this repo — use your own clubs' art.)
    profile (stops roaming scans, which silently drop broadcasts).
 4. Install the autostart entry:
    `cp skewered-station.desktop ~/.config/autostart/`
-5. Reboot. The station starts fullscreen on the touchscreen.
+5. Install the telemetry logger so it runs from boot (see *Diagnosing startup
+   problems* below for why this matters):
+   ```
+   sudo cp skewered-debug-logger.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now skewered-debug-logger
+   ```
+6. Reboot. The station starts fullscreen on the touchscreen.
 
 Manual start:
 `WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 python3 station.py`
@@ -111,6 +119,43 @@ YouTube's (free) API audit. Default quota allows ~6 uploads/day. Phone-verify
 the channel (youtube.com/verify) or videos over 15 min are rejected. The
 `client_secret_*.json` and `yt_token.json` are secrets — keep them out of
 version control.
+
+## Diagnosing startup problems
+
+The transmitter sometimes has no data at the Pi on a cold start. That failure is
+intermittent, so a single good boot after a change proves nothing — you need a
+baseline failure rate to compare against, which is what the boot-time logging is
+for.
+
+`debug_logger.py` runs from boot as a systemd unit rather than from
+`start_station.sh`, because that script waits up to 30 s for the webcam and the
+startup window is exactly what needs recording. It writes `wemos_debug.log` with
+one line per second, plus markers:
+
+| Marker | Meaning |
+|---|---|
+| `LOGGER-START pi_uptime=N` | How far into the Pi's boot the capture began (small N = the window is covered) |
+| `LINK-UP <if> ssid=...` | The Pi associated with the AP |
+| `LINK-DOWN <if>` | The Pi lost/never had association |
+| `SILENCE-BEGIN` / `SILENCE-END after Ns from=IP` | No beacon for 30 s, and when it returned |
+| `REBOOT cause=...` | Transmitter restarted; cause from the ESP8266 reset reason |
+| `LOOP-STALL` | `loop_count` did not advance between beacons |
+
+`rx` and `valid` on each line are **cumulative** counters, so the per-second
+delta tells you what the parser is actually seeing:
+
+| Pattern after a cold boot | Diagnosis |
+|---|---|
+| `SILENCE-BEGIN` → `SILENCE-END` roughly bracketing `LINK-UP` | Wi-Fi association delay, not the box. The AP's BSSID is pinned, so NetworkManager backs off if it scans before the ESP is beaconing |
+| Beacon flowing, `rx` climbing, `valid` flat | Bytes arriving but no valid frames — bus collision or line noise |
+| Beacon flowing, `rx` frozen at 0 | Nothing reaching the UART — receiver tri-stated (DE/RE) or converter unpowered |
+| Repeated `REBOOT cause=...` | Transmitter-side fault; chase that before the wiring |
+
+Collect ~10 cold boots before changing anything, then change **one** thing per
+batch. Candidates, cheapest first: unplug D6 (the current firmware uses the
+hardware UART on D7 only, so the D6 wire is a leftover from the SoftwareSerial
+build and is left undriven into the converter's DI); confirm DE/RE is tied low;
+then the failsafe biasing below.
 
 ## Hardware notes
 
