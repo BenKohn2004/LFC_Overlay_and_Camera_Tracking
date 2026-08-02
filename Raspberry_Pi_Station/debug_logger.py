@@ -30,8 +30,10 @@ LINK_POLL_S = 2.0                  # how often to re-check wifi association
 
 FMT_OLD = "<B6IB"      # 26 bytes: magic..stations
 FMT_NEW = "<B6IBB"     # 27 bytes: + rst_reason
+FMT_SH = "<B6IBBB"     # 28 bytes: + serial_reinits
 LEN_OLD = struct.calcsize(FMT_OLD)
 LEN_NEW = struct.calcsize(FMT_NEW)
+LEN_SH = struct.calcsize(FMT_SH)
 
 RST = {0: "power-on", 1: "HW-watchdog", 2: "EXCEPTION-crash",
        3: "SW-watchdog", 4: "ESP.restart", 5: "deep-sleep-wake",
@@ -150,13 +152,29 @@ def main():
 
     prev_uptime = None
     prev_loops = None
+    prev_reinits = None
     silent_since = None
-    last_beacon = time.time()
+    # All interval maths uses the monotonic clock. The Pi has no working RTC
+    # (it boots at 1970 and systemd-timesyncd restores an approximate time), so
+    # the wall clock steps -- by days -- the first time the Pi reaches the
+    # internet during a YouTube upload. Wall time is still what gets logged, so
+    # lines stay human-readable, but a step must not corrupt gap measurements.
+    last_beacon = time.monotonic()
     links = {}
     next_link_poll = 0.0
+    ref_wall, ref_mono = time.time(), time.monotonic()
 
     while True:
-        now = time.time()
+        now = time.monotonic()
+
+        # Announce clock steps: timestamps either side of one are not comparable.
+        wall = time.time()
+        drift = (wall - ref_wall) - (now - ref_mono)
+        if abs(drift) > 2.0:
+            log.write("CLOCK-STEP %+.1fs (wall clock jumped; earlier timestamps "
+                      "are on the old clock)" % drift)
+        ref_wall, ref_mono = wall, now
+
         if now >= next_link_poll:
             poll_links(log, links)
             next_link_poll = now + LINK_POLL_S
@@ -164,7 +182,7 @@ def main():
         try:
             data, addr = s.recvfrom(256)
         except socket.timeout:
-            if silent_since is None and time.time() - last_beacon > SILENCE_AFTER:
+            if silent_since is None and time.monotonic() - last_beacon > SILENCE_AFTER:
                 silent_since = last_beacon
                 log.write("SILENCE-BEGIN")
             continue
@@ -173,7 +191,12 @@ def main():
             continue
 
         rst = None
-        if len(data) == LEN_NEW:
+        reinits = None
+        if len(data) == LEN_SH:
+            m = struct.unpack(FMT_SH, data)
+            rst = m[8]
+            reinits = m[9]
+        elif len(data) == LEN_NEW:
             m = struct.unpack(FMT_NEW, data)
             rst = m[8]
         elif len(data) == LEN_OLD:
@@ -181,7 +204,7 @@ def main():
         else:
             continue
 
-        last_beacon = time.time()
+        last_beacon = time.monotonic()
         if silent_since is not None:
             log.write("SILENCE-END after %.0fs  from=%s"
                       % (last_beacon - silent_since, addr[0]))
@@ -194,9 +217,13 @@ def main():
             notes.append("REBOOT" + why)
         if prev_loops is not None and loops == prev_loops:
             notes.append("LOOP-STALL")
-        prev_uptime, prev_loops = up, loops
-        log.write("up=%dms loops=%d rx=%d valid=%d fails=%d heap=%d sta=%d %s"
-                  % (up, loops, rx, valid, fails, heap, stations,
+        if (reinits is not None and prev_reinits is not None
+                and reinits > prev_reinits and up >= prev_uptime):
+            notes.append("SERIAL-REINIT")
+        prev_uptime, prev_loops, prev_reinits = up, loops, reinits
+        sr = ("" if reinits is None else " sr=%d" % reinits)
+        log.write("up=%dms loops=%d rx=%d valid=%d fails=%d heap=%d sta=%d%s %s"
+                  % (up, loops, rx, valid, fails, heap, stations, sr,
                      " ".join(notes)))
 
 
