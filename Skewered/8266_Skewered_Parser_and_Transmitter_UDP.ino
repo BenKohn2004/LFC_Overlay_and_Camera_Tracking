@@ -385,7 +385,14 @@ struct __attribute__((packed)) DebugMessage {
 // therefore gated on the link ALREADY being idle: with nothing to receive,
 // briefly dropping the UART costs nothing.
 
-const unsigned long PROBE_IDLE_MS = 5000;     // rx must be static this long
+// Idleness is measured in VALID FRAMES, not raw bytes. A line with absent or
+// weak failsafe biasing trickles noise -- observed at ~10 bytes/s with zero
+// valid frames -- and gating on raw bytes would reset the timer every second,
+// so the probe would never fire in exactly the case worth diagnosing. The box
+// emits valid frames continuously whenever it is powered, so "no valid frame
+// for 5 s" means the link is genuinely not delivering and there is nothing for
+// the probe to corrupt.
+const unsigned long PROBE_IDLE_MS = 5000;     // no valid frame for this long
 const unsigned long PROBE_PERIOD_MS = 10000;  // and re-probe no faster than this
 
 enum : uint8_t {
@@ -396,8 +403,8 @@ enum : uint8_t {
 };
 
 uint8_t g_line_probe = PROBE_NONE;
-uint32_t lastRxBytes = 0;
-unsigned long lastRxChange = 0;
+uint32_t lastValidCount = 0;
+unsigned long lastValidChange = 0;
 unsigned long lastProbe = 0;
 
 void probeLine() {
@@ -507,15 +514,15 @@ void loop() {
 
   unsigned long dnow = millis();
 
-  // Probe the RS-485 line only once it has gone quiet. While bytes are still
-  // arriving there is nothing to diagnose, and the probe would corrupt the
-  // reception it interrupts.
-  if (rxBytes != lastRxBytes) {
-    lastRxBytes = rxBytes;
-    lastRxChange = dnow;
+  // Probe the RS-485 line only once valid frames have stopped. While the link
+  // is delivering there is nothing to diagnose, and the probe would corrupt
+  // the reception it interrupts.
+  if (validPackets != lastValidCount) {
+    lastValidCount = validPackets;
+    lastValidChange = dnow;
     g_line_probe = PROBE_NONE;
   }
-  if (dnow - lastRxChange > PROBE_IDLE_MS && dnow - lastProbe > PROBE_PERIOD_MS) {
+  if (dnow - lastValidChange > PROBE_IDLE_MS && dnow - lastProbe > PROBE_PERIOD_MS) {
     probeLine();
     lastProbe = dnow;
   }
