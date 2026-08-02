@@ -31,9 +31,19 @@ LINK_POLL_S = 2.0                  # how often to re-check wifi association
 FMT_OLD = "<B6IB"      # 26 bytes: magic..stations
 FMT_NEW = "<B6IBB"     # 27 bytes: + rst_reason
 FMT_SH = "<B6IBBB"     # 28 bytes: + serial_reinits
+FMT_PR = "<B6IBBBB"    # 29 bytes: + line_probe
 LEN_OLD = struct.calcsize(FMT_OLD)
 LEN_NEW = struct.calcsize(FMT_NEW)
 LEN_SH = struct.calcsize(FMT_SH)
+LEN_PR = struct.calcsize(FMT_PR)
+
+# line_probe: what the RS-485 receive line does with the pull-up removed.
+# Distinguishes a switched-off scoring box from a broken link -- both of which
+# otherwise look identical (rx_bytes simply stops moving).
+PROBE = {0: "none",       # not probed; the link is live
+         1: "FLOATING",   # high-Z: broken connection or tri-stated receiver
+         2: "driven-high",  # converter alive, box merely idle
+         3: "LOW"}        # break condition or mis-wired pair
 
 RST = {0: "power-on", 1: "HW-watchdog", 2: "EXCEPTION-crash",
        3: "SW-watchdog", 4: "ESP.restart", 5: "deep-sleep-wake",
@@ -153,6 +163,7 @@ def main():
     prev_uptime = None
     prev_loops = None
     prev_reinits = None
+    prev_probe = None
     silent_since = None
     # All interval maths uses the monotonic clock. The Pi has no working RTC
     # (it boots at 1970 and systemd-timesyncd restores an approximate time), so
@@ -192,7 +203,13 @@ def main():
 
         rst = None
         reinits = None
-        if len(data) == LEN_SH:
+        probe = None
+        if len(data) == LEN_PR:
+            m = struct.unpack(FMT_PR, data)
+            rst = m[8]
+            reinits = m[9]
+            probe = m[10]
+        elif len(data) == LEN_SH:
             m = struct.unpack(FMT_SH, data)
             rst = m[8]
             reinits = m[9]
@@ -220,10 +237,20 @@ def main():
         if (reinits is not None and prev_reinits is not None
                 and reinits > prev_reinits and up >= prev_uptime):
             notes.append("SERIAL-REINIT")
+        # The probe only runs on an idle link, so a transition to FLOATING/LOW
+        # is the interesting event: it means the silence is a wiring fault
+        # rather than a box nobody has switched on.
+        if probe is not None and probe != prev_probe:
+            if probe in (1, 3):
+                notes.append("LINE-%s" % PROBE[probe])
+            elif probe == 2 and prev_probe in (1, 3):
+                notes.append("LINE-recovered")
         prev_uptime, prev_loops, prev_reinits = up, loops, reinits
+        prev_probe = probe
         sr = ("" if reinits is None else " sr=%d" % reinits)
-        log.write("up=%dms loops=%d rx=%d valid=%d fails=%d heap=%d sta=%d%s %s"
-                  % (up, loops, rx, valid, fails, heap, stations, sr,
+        pr = ("" if probe is None else " line=%s" % PROBE.get(probe, probe))
+        log.write("up=%dms loops=%d rx=%d valid=%d fails=%d heap=%d sta=%d%s%s %s"
+                  % (up, loops, rx, valid, fails, heap, stations, sr, pr,
                      " ".join(notes)))
 
 
