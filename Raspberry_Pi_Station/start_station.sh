@@ -1,6 +1,10 @@
 #!/bin/bash
-# Autostart launcher: wait for the webcam, then run the fencing station.
-for i in $(seq 1 30); do
+# Autostart launcher: give the webcam a moment to enumerate, then run the
+# station. The wait used to be 30 s because station.py died without a camera;
+# it now starts regardless and polls for one, so this only avoids a brief
+# "NO CAMERA" flash on a normal boot. Don't lengthen it -- with no camera
+# attached this is dead time before the review UI appears.
+for i in $(seq 1 5); do
     [ -e /dev/video0 ] && break
     sleep 1
 done

@@ -561,6 +561,41 @@ class Button:
         surf.blit(t, t.get_rect(center=self.rect.center))
 
 
+# Overridable so the no-camera path can be exercised on a machine that has a
+# camera, without fighting the running station for the v4l2 device.
+CAM_DEV = os.environ.get("SKEWERED_CAM_DEV", "/dev/video0")
+CAM_RETRY_SECS = 5.0     # how often to look for a camera that is not there yet
+
+
+def open_camera():
+    """Start the capture ffmpeg, or return None if there is no camera.
+
+    Returning None puts the station in review mode: the live view is a
+    placeholder and recording is disabled, but bout browsing, replay, name
+    entry and uploads all work. That is the point -- reviewing a session
+    afterwards should not require dragging the camera back out.
+    """
+    if not os.path.exists(CAM_DEV):
+        return None
+    return subprocess.Popen(
+        ["ffmpeg", "-loglevel", "error", "-f", "v4l2",
+         "-input_format", "mjpeg", "-video_size", "1920x1080",
+         "-framerate", str(FPS), "-i", CAM_DEV,
+         "-vf", "scale=%d:%d" % (REC_W, REC_H),
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        stdout=subprocess.PIPE, bufsize=REC_W * REC_H * 3)
+
+
+def close_camera(dec):
+    if not dec:
+        return
+    try:
+        dec.kill()
+        dec.wait(timeout=2)
+    except Exception:
+        pass
+
+
 def main():
     force_record = "--force-record" in sys.argv
     deadline = None
@@ -586,13 +621,11 @@ def main():
     font_head = pygame.font.SysFont("dejavusans", 24, bold=True)
     CLOCK_CENTER = (REC_W // 2, round(950 * REC_H / 1080.0))
 
-    dec = subprocess.Popen(
-        ["ffmpeg", "-loglevel", "error", "-f", "v4l2",
-         "-input_format", "mjpeg", "-video_size", "1920x1080",
-         "-framerate", str(FPS), "-i", "/dev/video0",
-         "-vf", "scale=%d:%d" % (REC_W, REC_H),
-         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-        stdout=subprocess.PIPE, bufsize=REC_W * REC_H * 3)
+    dec = open_camera()
+    next_cam_try = time.time() + CAM_RETRY_SECS
+    # Without a camera the blocking frame read no longer paces the loop, so it
+    # has to be clocked explicitly or it spins a core flat.
+    clock = pygame.time.Clock()
     FRAME = REC_W * REC_H * 3
     PFRAME = DISP_W * DISP_H * 3
 
@@ -938,11 +971,27 @@ def main():
                         break
 
         # ---------- capture + overlay + record (every mode) ----------
-        buf = dec.stdout.read(FRAME)
-        if len(buf) < FRAME:
-            break
-        img = pygame.image.frombuffer(buf, (REC_W, REC_H), "RGB")
-        surf.blit(img, (0, 0))
+        # A short read means the capture died (camera unplugged, or it was
+        # never there). Previously that broke the loop and the whole station
+        # exited -- a camera glitch mid-tournament killed the app for the rest
+        # of the day, since the XDG autostart only runs once at login. Now it
+        # drops to review mode and keeps retrying.
+        buf = dec.stdout.read(FRAME) if dec else b""
+        if dec and len(buf) < FRAME:
+            close_camera(dec)
+            dec = None
+            next_cam_try = time.time() + CAM_RETRY_SECS
+
+        if dec:
+            img = pygame.image.frombuffer(buf, (REC_W, REC_H), "RGB")
+            surf.blit(img, (0, 0))
+        else:
+            # No camera: placeholder frame, and pace the loop ourselves.
+            surf.fill((16, 16, 20))
+            clock.tick(FPS)
+            if time.time() >= next_cam_try:
+                dec = open_camera()
+                next_cam_try = time.time() + CAM_RETRY_SECS
 
         with _lock:
             st = dict(state)
@@ -952,7 +1001,12 @@ def main():
             slog = state_changes[:]
             del state_changes[:]
         now = time.time()
-        active = now - last_activity[0] < IDLE_STOP_SECS and last_activity[0] > 0
+        # Recording requires a camera. Without this gate, box activity while
+        # the camera is detached would record a blank screen and write
+        # sessions, bouts and touch events into the database pointing at video
+        # that shows nothing -- polluting the bout browser and eating disk.
+        active = (now - last_activity[0] < IDLE_STOP_SECS and last_activity[0] > 0
+                  and dec is not None)
         if active and not rec.active:
             rec.start()
         elif not active and rec.active:
@@ -1192,6 +1246,15 @@ def main():
         if mode == MODE_LIVE:
             disp = pygame.transform.smoothscale(surf, (DISP_W, DISP_H))
             screen.blit(disp, (0, YOFF))
+            # Say so loudly. The old behaviour was to exit outright, which was
+            # at least obvious; sitting in review mode is quieter, and nobody
+            # should discover at the end of a session that nothing recorded.
+            if dec is None:
+                s = font_head.render("NO CAMERA - REVIEW MODE", True, (255, 190, 60))
+                screen.blit(s, s.get_rect(center=(DISP_W // 2, YOFF + DISP_H // 2 - 16)))
+                s2 = font_sml.render("Recording disabled. Bouts, replay and upload still work.",
+                                     True, (200, 200, 210))
+                screen.blit(s2, s2.get_rect(center=(DISP_W // 2, YOFF + DISP_H // 2 + 18)))
             buttons.append(Button((548, 2, 116, 40), "REPLAY", ("replay_last",)))
             buttons.append(Button((676, 2, 116, 40), "BOUTS", ("goto_bouts",)))
             # invisible tap zones over the nameplates -> name entry
@@ -1421,7 +1484,7 @@ def main():
 
     stop_playback(play)
     rec.stop()
-    dec.terminate()
+    close_camera(dec)          # dec is None when running without a camera
     pygame.quit()
     con.close()
     print("avg fps: %.1f  frames: %d" % (frames / (time.time() - t0), frames))
