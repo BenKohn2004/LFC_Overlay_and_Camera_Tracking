@@ -1981,9 +1981,14 @@ def main():
             # under the 30 px replay banner. The top of frame is usually
             # ceiling; the bottom is feet, which matter in fencing.
             BY = 32
-            bar = pygame.Surface((800, 56), pygame.SRCALPHA)
-            bar.fill((0, 0, 0, 150))
-            screen.blit(bar, (0, BY))
+            # The bar only earns its screen space once slow motion is engaged
+            # and there is status to carry. During ordinary review the lone
+            # SLOW MOTION button draws its own background, so the picture
+            # stays clear.
+            if play["pending"] or play["menu"] or play["frames"]:
+                bar = pygame.Surface((800, 56), pygame.SRCALPHA)
+                bar.fill((0, 0, 0, 150))
+                screen.blit(bar, (0, BY))
             if play["pending"]:
                 s = font_ui.render("Loading slow motion...", True, (255, 230, 160))
                 screen.blit(s, s.get_rect(center=(400, BY + 28)))
