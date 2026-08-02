@@ -418,6 +418,152 @@ def export_bout(con, rec, bout_id):
     return out, None
 
 
+YT_DESC_MAX = 5000        # YouTube's hard description limit
+YT_DESC_MARGIN = 250      # stay clear of it
+YT_MIN_CHAPTER = 10.0     # a chapter shorter than this voids the WHOLE list
+
+
+def clip_duration(path):
+    """Length of a cut clip in seconds, or None if ffprobe cannot tell."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=60).stdout.strip()
+        return float(out)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return None
+
+
+def hms(t):
+    """YouTube timestamp: M:SS below an hour, H:MM:SS at or above."""
+    t = max(0, int(t))
+    h, m, s = t // 3600, (t % 3600) // 60, t % 60
+    return "%d:%02d:%02d" % (h, m, s) if h else "%d:%02d" % (m, s)
+
+
+def bout_chapter_label(con, bout_id):
+    row = con.execute(
+        "SELECT l_name, r_name,"
+        " (SELECT e.l_after FROM events e WHERE e.bout_id=bouts.id AND"
+        "  e.type='touch' ORDER BY e.id DESC LIMIT 1),"
+        " (SELECT e.r_after FROM events e WHERE e.bout_id=bouts.id AND"
+        "  e.type='touch' ORDER BY e.id DESC LIMIT 1)"
+        " FROM bouts WHERE id=?", (bout_id,)).fetchone()
+    ln, rn, lf, rf = row
+    score = " (%d-%d)" % (lf, rf) if lf is not None else ""
+    return "%s vs %s%s" % (ln or "Left", rn or "Right", score)
+
+
+def combined_title(con, bout_ids):
+    q = ",".join("?" * len(bout_ids))
+    lo, hi = con.execute("SELECT MIN(start_ts), MAX(start_ts) FROM bouts"
+                         " WHERE id IN (%s)" % q, bout_ids).fetchone()
+    first = time.strftime("%Y-%m-%d", time.localtime(lo))
+    last = time.strftime("%Y-%m-%d", time.localtime(hi))
+    span = first if first == last else "%s to %s" % (first, last)
+    return "Fencing - %d bouts - %s" % (len(bout_ids), span)
+
+
+def combined_description(con, parts, total):
+    """Bout chapters, then per-touch timestamps for as long as they fit.
+
+    Two YouTube rules drive the shape of this:
+
+    1. Chapters must start at 0:00, be in order, and every one must last at
+       least 10 s. Break any of those and YouTube silently drops the entire
+       chapter bar rather than just the offending entry.
+    2. A timestamp is only treated as a chapter when it BEGINS a line.
+
+    22% of consecutive touches in this database are less than 10 s apart, so
+    touches cannot be chapters. They are written mid-line instead ("1 - 0 at
+    4:21"), which keeps them clickable while leaving the chapter list to the
+    bouts alone.
+    """
+    chapters, blocks, off = [], [], 0.0
+    for bid, _path, dur in parts:
+        label = bout_chapter_label(con, bid)
+        chapters.append((off, label))
+        rng = bout_video_range(con, bid)
+        items = []
+        if rng:
+            _sid, cstart, _cend = rng
+            for so, l, r, d in con.execute(
+                    "SELECT session_offset, l_after, r_after, detail FROM"
+                    " events WHERE bout_id=? AND type='touch' ORDER BY id",
+                    (bid,)):
+                items.append((off + max(0.0, so - cstart),
+                              "%d - %d (%s)" % (l, r, (d or "").replace("_", " "))))
+        blocks.append((label, items))
+        off += dur
+
+    kept = []
+    for o, label in chapters:
+        if not kept or o - kept[-1][0] >= YT_MIN_CHAPTER:
+            kept.append((o, label))
+    while len(kept) > 1 and total - kept[-1][0] < YT_MIN_CHAPTER:
+        kept.pop()          # a too-short final chapter voids the list too
+
+    lines = ["Bouts:"]
+    lines += ["%s %s" % (hms(o), label) for o, label in kept]
+    tail = ["", "Recorded automatically by the fencing strip station."]
+    budget = YT_DESC_MAX - YT_DESC_MARGIN - len("\n".join(lines + tail))
+
+    body, used = ["", "Touches:"], 0
+    for label, items in blocks:
+        chunk = [label] + ["   %s at %s" % (txt, hms(o)) for o, txt in items]
+        n = sum(len(x) + 1 for x in chunk)
+        if used + n > budget:
+            body.append("(touch list truncated - description length limit)")
+            break
+        body += chunk
+        used += n
+    return "\n".join(lines + body + tail)
+
+
+def build_combined(con, rec, bout_ids):
+    """Cut every bout, then concatenate them into one video.
+
+    Returns (path, title, description, used_ids, errors).
+    """
+    parts, errors = [], []
+    for bid in bout_ids:
+        path, err = export_bout(con, rec, bid)
+        if not path:
+            errors.append((bid, err))
+            continue
+        dur = clip_duration(path)
+        if dur is None:
+            errors.append((bid, "unreadable clip"))
+            continue
+        parts.append((bid, path, dur))
+    if not parts:
+        return None, None, None, [], errors
+
+    out = os.path.join(UPLOAD_DIR,
+                       "combined_%s.mp4" % time.strftime("%Y%m%d_%H%M%S"))
+    lst = os.path.join(UPLOAD_DIR, "concat_combined.txt")
+    with open(lst, "w") as fh:
+        for _bid, p, _d in parts:
+            fh.write("file '%s'\n" % p.replace("'", "'\\''"))
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+             "-i", lst, "-c", "copy", "-movflags", "+faststart", out],
+            capture_output=True, timeout=3600)
+    finally:
+        try:
+            os.remove(lst)
+        except OSError:
+            pass
+    if r.returncode != 0 or not os.path.exists(out):
+        return None, None, None, [], errors + [(0, "combine failed")]
+
+    total = sum(d for _b, _p, d in parts)
+    ids = [b for b, _p, _d in parts]
+    return out, combined_title(con, ids), combined_description(con, parts, total), ids, errors
+
+
 def bout_upload_title(con, bout_id):
     row = con.execute(
         "SELECT start_ts, l_name, r_name,"
@@ -644,7 +790,7 @@ def main():
     bout_rows, bout_page = [], 0
     touch_rows, touch_page = [], 0
     cur_bout = None            # (bout_id, title)
-    confirm = None             # {title, lines, yes_label, yes, from} in MODE_CONFIRM
+    confirm = None             # {title, lines, choices, from} in MODE_CONFIRM
     play = None                # {"proc", "banner", "from_mode"}
     flash = None               # (text, until_ts)
     name_side = "l"            # which plate is being edited
@@ -665,11 +811,12 @@ def main():
     upload_job = {"active": False, "done": 0, "total": 0, "ok": 0, "fail": 0,
                   "finished": False, "current": "", "pct": 0, "error": ""}
 
-    def start_exports(bout_ids):
+    def start_exports(bout_ids, combine=False):
         if export_job["active"] or not bout_ids:
             return
         export_job.update(active=True, done=0, total=len(bout_ids), ok=0,
-                          fail=0, finished=False)
+                          fail=0, finished=False, combine=combine,
+                          ids=list(bout_ids))
 
         def worker():
             c2 = sqlite3.connect(DBPATH, timeout=10)
@@ -745,11 +892,100 @@ def main():
         threading.Thread(target=worker, daemon=True).start()
         return True
 
+    def start_combined_upload(ids):
+        """Concatenate the cut bouts into one video and upload that.
+
+        One video instead of N is the whole point: YouTube's daily limit
+        counts videos, not minutes, so a backlog that would blow the quota
+        fits in a single upload.
+        """
+        if upload_job["active"] or yt_upload is None or not ids:
+            return False
+        upload_job.update(active=True, done=0, total=1, ok=0, fail=0,
+                          finished=False, current="Combining...", pct=0,
+                          error="")
+
+        def worker():
+            c2 = sqlite3.connect(DBPATH, timeout=10)
+            path, used = None, []
+            try:
+                path, title, desc, used, errs = build_combined(c2, rec, ids)
+                if not path:
+                    upload_job["error"] = "combine failed"
+                    upload_job["fail"] = 1
+                else:
+                    upload_job["current"] = title
+
+                    def prog(sent, total, _j=upload_job):
+                        _j["pct"] = int(sent * 100 / max(1, total))
+
+                    vid = yt_upload.upload(path, title, description=desc,
+                                           token_path=TOKEN_PATH, progress=prog)
+                    for bid in used:
+                        c2.execute("UPDATE bouts SET youtube_id=? WHERE id=?",
+                                   (vid or "uploaded", bid))
+                    c2.commit()
+                    upload_job["ok"] = 1
+            except Exception as e:
+                upload_job["error"] = str(e)[:70]
+                upload_job["fail"] = 1
+            finally:
+                # Both the per-bout cuts and the combined file are disposable:
+                # nothing resumes a part-finished upload, so a retry re-cuts
+                # anyway, and these are large enough to fill the card.
+                for bid in used:
+                    p = os.path.join(UPLOAD_DIR, "bout_%04d.mp4" % bid)
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                c2.close()
+                upload_job["done"] = 1
+                upload_job["active"] = False
+                upload_job["finished"] = True
+        threading.Thread(target=worker, daemon=True).start()
+        return True
+
+    def begin_upload_phase():
+        """Route to one-combined-video or the per-bout uploader."""
+        if export_job.get("combine"):
+            return start_combined_upload(export_job.get("ids") or [])
+        return start_uploads()
+
     def uploadable_bouts():
         return [r[0] for r in con.execute(
             "SELECT b.id FROM bouts b WHERE b.youtube_id='' AND EXISTS"
             " (SELECT 1 FROM events e WHERE e.bout_id=b.id AND"
             "  e.type='touch') ORDER BY b.id")]
+
+    def uploadable_bouts_latest_day():
+        """(ids, label) for pending bouts on the most recent day that has any.
+
+        "Today" is deliberately the latest day with pending bouts rather than
+        the actual calendar today: after an evening session the Pi is often
+        not touched until the next morning, and an empty selection would be
+        useless. Grouping uses local dates, not a rolling 24 hours, so a
+        session that ran past midnight splits -- which matches how people
+        talk about which night a bout happened on.
+        """
+        ids = uploadable_bouts()
+        if not ids:
+            return [], "-"
+        q = ",".join("?" * len(ids))
+        rows = con.execute("SELECT id, start_ts FROM bouts WHERE id IN (%s)" % q,
+                           ids).fetchall()
+        days = {}
+        for bid, ts in rows:
+            days.setdefault(time.strftime("%Y-%m-%d", time.localtime(ts)),
+                            []).append(bid)
+        latest = max(days)
+        return sorted(days[latest]), latest
 
     def wifi_kb_rows():
         if wifi_sym:
@@ -1118,24 +1354,19 @@ def main():
                     "lines": [cur_bout["title"],
                               "%d touches will be removed." % n_touch,
                               "Video segments are kept (shared with other bouts)."],
-                    "yes_label": "DELETE",
-                    "yes": ("do_delete_bout", action[1]),
+                    "choices": [("DELETE", ("do_delete_bout", action[1]))],
                     "from": MODE_TOUCHES}
                 mode = MODE_CONFIRM
             elif action[0] == "confirm_no":
                 mode = confirm["from"] if confirm else MODE_BOUTS
                 confirm = None
-            elif action[0] == "confirm_yes":
-                act = confirm["yes"] if confirm else None
+            elif action[0] == "do_delete_bout":
                 confirm = None
-                if act and act[0] == "do_delete_bout":
-                    delete_bout(act[1])
-                    bout_rows, bout_page = load_bouts(), 0
-                    cur_bout = None
-                    mode = MODE_BOUTS
-                    flash = ("Bout deleted", now + 2)
-                else:
-                    mode = MODE_BOUTS
+                delete_bout(action[1])
+                bout_rows, bout_page = load_bouts(), 0
+                cur_bout = None
+                mode = MODE_BOUTS
+                flash = ("Bout deleted", now + 2)
             elif action[0] == "open_bout":
                 cur_bout = action[1]
                 touch_rows, touch_page = load_touches(cur_bout["bout_id"]), 0
@@ -1194,9 +1425,31 @@ def main():
                 mode = MODE_CLUB
             elif action[0] == "upload_all":
                 ids = uploadable_bouts()
+                if not ids:
+                    flash = ("Nothing new to upload", now + 2)
+                else:
+                    day_ids, day_label = uploadable_bouts_latest_day()
+                    ch = [("ALL  (%d)" % len(ids), ("do_upload_all", "all"))]
+                    # Only offer the day option when it is a genuine subset.
+                    if day_ids and len(day_ids) < len(ids):
+                        ch.append(("%s  (%d)" % (day_label, len(day_ids)),
+                                   ("do_upload_all", "day")))
+                    confirm = {
+                        "title": "Combine and upload which bouts?",
+                        "lines": ["They become ONE video with chapters,",
+                                  "so the whole backlog costs one upload.",
+                                  "Most recent day: %s" % day_label],
+                        "choices": ch, "danger": False, "from": MODE_BOUTS}
+                    mode = MODE_CONFIRM
+            elif action[0] == "do_upload_all":
+                confirm = None
+                mode = MODE_BOUTS
+                ids = (uploadable_bouts() if action[1] == "all"
+                       else uploadable_bouts_latest_day()[0])
                 if ids:
-                    start_exports(ids)
-                    flash = ("Preparing %d bout video(s)..." % len(ids), now + 3)
+                    start_exports(ids, combine=True)
+                    flash = ("Preparing %d bout(s) as one video..." % len(ids),
+                             now + 3)
                 else:
                     flash = ("Nothing new to upload", now + 2)
             elif action[0] == "upload_one":
@@ -1278,7 +1531,7 @@ def main():
                 wifi_page = 0
                 start_wifi_scan()
                 mode = MODE_WIFI
-            elif export_job["ok"] and start_uploads():
+            elif export_job["ok"] and begin_upload_phase():
                 flash = (msg + " - uploading...", now + 4)
             else:
                 flash = (msg, now + 4)
@@ -1382,21 +1635,30 @@ def main():
                                             (150, 150, 160)), (744, 436))
 
         elif mode == MODE_CONFIRM:
-            c = confirm or {"title": "", "lines": [], "yes_label": "OK"}
-            pygame.draw.rect(screen, (40, 20, 20), (60, 90, 680, 250))
-            pygame.draw.rect(screen, (200, 70, 70), (60, 90, 680, 250), 3)
-            t = font_head.render(c["title"], True, (255, 210, 210))
+            c = confirm or {"title": "", "lines": [], "choices": []}
+            danger = c.get("danger", True)
+            bg = (40, 20, 20) if danger else (20, 30, 42)
+            edge = (200, 70, 70) if danger else (90, 150, 210)
+            pygame.draw.rect(screen, bg, (60, 90, 680, 250))
+            pygame.draw.rect(screen, edge, (60, 90, 680, 250), 3)
+            t = font_head.render(c["title"], True,
+                                 (255, 210, 210) if danger else (215, 230, 250))
             screen.blit(t, t.get_rect(center=(400, 130)))
             ly = 180
             for line in c["lines"]:
                 s = font_row.render(line, True, (235, 235, 245))
                 screen.blit(s, s.get_rect(center=(400, ly)))
-                ly += 32
-            # CANCEL on the left and wider: the safe choice should be the easy
-            # one to hit on a small touchscreen.
-            buttons.append(Button((92, 272, 300, 52), "CANCEL", ("confirm_no",)))
-            buttons.append(Button((420, 272, 288, 52), c["yes_label"],
-                                  ("confirm_yes",)))
+                ly += 30
+            # CANCEL always sits leftmost: the safe choice should be the easy
+            # one to hit on a small touchscreen. Remaining choices share the
+            # rest of the row.
+            ch = c["choices"]
+            buttons.append(Button((92, 272, 180, 52), "CANCEL", ("confirm_no",)))
+            if ch:
+                x, w = 288, (420 - 8 * (len(ch) - 1)) // len(ch)
+                for label, act in ch:
+                    buttons.append(Button((x, 272, w, 52), label, act))
+                    x += w + 8
 
         elif mode == MODE_NAME:
             side_label = "LEFT" if name_side == "l" else "RIGHT"
