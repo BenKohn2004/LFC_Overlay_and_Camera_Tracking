@@ -59,6 +59,7 @@ NAME_MAX = 16
 DEFAULT_NAMES = {"l": "LEFT FENCER", "r": "RIGHT FENCER"}
 MODE_WIFI = "wifi"
 MODE_WIFIPW = "wifipw"
+MODE_CONFIRM = "confirm"    # generic yes/no gate in front of a destructive action
 LOGODIR = os.path.join(os.path.expanduser("~/skewered"), "logos")
 UPLOAD_DIR = os.path.join(os.path.expanduser("~/skewered"), "uploads")
 TOKEN_PATH = os.path.join(os.path.expanduser("~/skewered"), "yt_token.json")
@@ -643,6 +644,7 @@ def main():
     bout_rows, bout_page = [], 0
     touch_rows, touch_page = [], 0
     cur_bout = None            # (bout_id, title)
+    confirm = None             # {title, lines, yes_label, yes, from} in MODE_CONFIRM
     play = None                # {"proc", "banner", "from_mode"}
     flash = None               # (text, until_ts)
     name_side = "l"            # which plate is being edited
@@ -873,6 +875,30 @@ def main():
             rest = [c for c in rest if filt.lower() in c.lower()]
         return out + rest
 
+    def delete_bout(bout_id):
+        """Remove a bout and its touches from the database.
+
+        Deliberately does NOT delete the recording segments. Segments are
+        time-based files shared by every bout in the same session, so removing
+        them would blank out the neighbouring bouts too. Disk is already
+        managed by Recorder.ensure_space(), which trims the oldest segments
+        when space runs low.
+
+        The per-bout export in UPLOAD_DIR is ours alone, so that does go.
+        """
+        row = con.execute("SELECT upload_path FROM bouts WHERE id=?",
+                          (bout_id,)).fetchone()
+        con.execute("DELETE FROM events WHERE bout_id=?", (bout_id,))
+        con.execute("DELETE FROM bouts WHERE id=?", (bout_id,))
+        con.commit()
+        for p in (row[0] if row else "",
+                  os.path.join(UPLOAD_DIR, "bout_%04d.mp4" % bout_id)):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
     def load_bouts():
         rows = con.execute("""
             SELECT b.id, b.session_id, b.start_ts, b.l_name, b.r_name,
@@ -1083,6 +1109,33 @@ def main():
                 else:
                     touch_page = max(0, min(touch_page + action[1],
                                             (len(touch_rows) - 1) // ROWS_PER_PAGE))
+            elif action[0] == "ask_delete_bout":
+                n_touch = con.execute(
+                    "SELECT COUNT(*) FROM events WHERE bout_id=? AND type='touch'",
+                    (action[1],)).fetchone()[0]
+                confirm = {
+                    "title": "Delete this bout?",
+                    "lines": [cur_bout["title"],
+                              "%d touches will be removed." % n_touch,
+                              "Video segments are kept (shared with other bouts)."],
+                    "yes_label": "DELETE",
+                    "yes": ("do_delete_bout", action[1]),
+                    "from": MODE_TOUCHES}
+                mode = MODE_CONFIRM
+            elif action[0] == "confirm_no":
+                mode = confirm["from"] if confirm else MODE_BOUTS
+                confirm = None
+            elif action[0] == "confirm_yes":
+                act = confirm["yes"] if confirm else None
+                confirm = None
+                if act and act[0] == "do_delete_bout":
+                    delete_bout(act[1])
+                    bout_rows, bout_page = load_bouts(), 0
+                    cur_bout = None
+                    mode = MODE_BOUTS
+                    flash = ("Bout deleted", now + 2)
+                else:
+                    mode = MODE_BOUTS
             elif action[0] == "open_bout":
                 cur_bout = action[1]
                 touch_rows, touch_page = load_touches(cur_bout["bout_id"]), 0
@@ -1296,6 +1349,11 @@ def main():
                 buttons.append(Button((560, 4, 172, 40), "UPLOAD ALL",
                                       ("upload_all",)))
             else:
+                # Left of UPLOAD, same slot the WIFI button uses on the bouts
+                # screen. Both live in this branch, so neither is offered while
+                # an upload or export is running.
+                buttons.append(Button((430, 4, 104, 40), "DELETE",
+                                      ("ask_delete_bout", cur_bout["bout_id"])))
                 buttons.append(Button((560, 4, 172, 40), "UPLOAD",
                                       ("upload_one", cur_bout["bout_id"])))
             y = 52
@@ -1322,6 +1380,23 @@ def main():
                                       enabled=page < npages - 1))
                 screen.blit(font_sml.render("%d/%d" % (page + 1, npages), True,
                                             (150, 150, 160)), (744, 436))
+
+        elif mode == MODE_CONFIRM:
+            c = confirm or {"title": "", "lines": [], "yes_label": "OK"}
+            pygame.draw.rect(screen, (40, 20, 20), (60, 90, 680, 250))
+            pygame.draw.rect(screen, (200, 70, 70), (60, 90, 680, 250), 3)
+            t = font_head.render(c["title"], True, (255, 210, 210))
+            screen.blit(t, t.get_rect(center=(400, 130)))
+            ly = 180
+            for line in c["lines"]:
+                s = font_row.render(line, True, (235, 235, 245))
+                screen.blit(s, s.get_rect(center=(400, ly)))
+                ly += 32
+            # CANCEL on the left and wider: the safe choice should be the easy
+            # one to hit on a small touchscreen.
+            buttons.append(Button((92, 272, 300, 52), "CANCEL", ("confirm_no",)))
+            buttons.append(Button((420, 272, 288, 52), c["yes_label"],
+                                  ("confirm_yes",)))
 
         elif mode == MODE_NAME:
             side_label = "LEFT" if name_side == "l" else "RIGHT"
