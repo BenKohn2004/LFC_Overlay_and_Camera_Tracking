@@ -79,6 +79,28 @@ last_activity = [0.0]
 pending_events = []
 state_changes = []
 
+# ts of a touch whose final score has not settled yet. A touch is written the
+# moment its lights go out, but the score at that instant is unreliable: the
+# referee enters the point either side of clearing the lights, and in this
+# station's own history 53% of touches showed no score change by lights-out.
+# So the score written then is a placeholder, corrected once it has definitely
+# settled -- see settle_pending_touch().
+pending_touch = [None]
+
+
+def settle_pending_touch(l, r):
+    """Correct the score on the touch that is waiting for one.
+
+    Caller must hold _lock. Emits a `touch_score` event that the main thread
+    turns into an UPDATE; events are created here but written there, so this
+    keeps that boundary rather than reaching into the database.
+    """
+    if pending_touch[0] is None:
+        return
+    pending_events.append({"type": "touch_score", "ts": pending_touch[0],
+                           "l0": 0, "r0": 0, "l1": l, "r1": r, "detail": ""})
+    pending_touch[0] = None
+
 
 def udp_thread():
     prev = None
@@ -122,6 +144,10 @@ def udp_thread():
                                   "".join("1" if x else "0" for x in flags)))
 
             if (l, r) == (0, 0) and (pl, pr) != (0, 0):
+                # Trigger 2: the bout ended. Settle BEFORE recording the reset
+                # -- (l, r) is already 0-0 here, so the final score only still
+                # exists in the previous packet.
+                settle_pending_touch(pl, pr)
                 pending_events.append({"type": "bout_start", "ts": now,
                                        "l0": pl, "r0": pr, "l1": 0, "r1": 0,
                                        "detail": ""})
@@ -129,17 +155,25 @@ def udp_thread():
             hit_now = any(flags[0:4])
             hit_prev = any(pf[0:4])
             if hit_now and not hit_prev and episode is None:
+                # Trigger 1: new lights. The score just before them is the
+                # settled result of the previous touch -- which also makes each
+                # touch's after-score equal the next one's before-score.
+                settle_pending_touch(pl, pr)
                 episode = {"ts": now, "lights": set(), "l0": pl, "r0": pr}
             if episode is not None:
                 for i in range(4):
                     if flags[i]:
                         episode["lights"].add(FLAG_NAMES[i])
                 if not hit_now:
+                    # Write the touch now so a crash cannot lose it, but treat
+                    # this score as provisional -- it is corrected by one of
+                    # the three settle triggers.
                     pending_events.append({
                         "type": "touch", "ts": episode["ts"],
                         "l0": episode["l0"], "r0": episode["r0"],
                         "l1": l, "r1": r,
                         "detail": "+".join(sorted(episode["lights"]))})
+                    pending_touch[0] = episode["ts"]
                     episode = None
 
             for i in range(6, 12):
@@ -237,6 +271,7 @@ class Recorder:
     def start(self):
         os.makedirs(RECDIR, exist_ok=True)
         self.ensure_space()
+        pending_touch[0] = None    # nothing from a previous session carries over
         now = time.time()
         cur = self.con.execute(
             "INSERT INTO sessions(start_ts, end_ts) VALUES(?,?)", (now, now))
@@ -299,6 +334,16 @@ class Recorder:
         self.con.commit()
 
     def log_event(self, ev):
+        if ev["type"] == "touch_score":
+            # Correct a placeholder score in place. Matched on the touch's own
+            # timestamp, so the row keeps its original session_offset and the
+            # replay position is untouched.
+            self.con.execute(
+                "UPDATE events SET l_after=?, r_after=? WHERE type='touch'"
+                " AND session_id=? AND ts=?",
+                (ev["l1"], ev["r1"], self.session_id, ev["ts"]))
+            self.con.commit()
+            return
         off = ev["ts"] - self.session_start if self.session_start else 0
         if ev["type"] == "bout_start":
             self._new_bout(ev["ts"], off)
@@ -1111,6 +1156,22 @@ def main():
             rest = [c for c in rest if filt.lower() in c.lower()]
         return out + rest
 
+    def flush_pending_touch():
+        """Trigger 3: settle a touch left hanging when the session ends.
+
+        Without this the last touch of every session keeps its placeholder --
+        practice finishes, the box is switched off, and neither of the other
+        two triggers ever fires. Must run while the recorder is still active,
+        since that is what writes events.
+        """
+        with _lock:
+            ts = pending_touch[0]
+            pending_touch[0] = None
+            lf, rf = state["l"], state["r"]
+        if ts is not None and rec.active:
+            rec.log_event({"type": "touch_score", "ts": ts, "l0": 0, "r0": 0,
+                           "l1": lf, "r1": rf, "detail": ""})
+
     def delete_bout(bout_id):
         """Remove a bout and its touches from the database.
 
@@ -1272,6 +1333,7 @@ def main():
         if active and not rec.active:
             rec.start()
         elif not active and rec.active:
+            flush_pending_touch()      # settle before the session closes
             rec.stop()
 
         stale = st["age"] is None or now - st["age"] > 3
@@ -1820,6 +1882,7 @@ def main():
         pygame.display.flip()
 
     stop_playback(play)
+    flush_pending_touch()      # and again on a clean exit
     rec.stop()
     close_camera(dec)          # dec is None when running without a camera
     pygame.quit()
