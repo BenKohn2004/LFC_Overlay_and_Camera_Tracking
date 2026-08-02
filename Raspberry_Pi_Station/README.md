@@ -152,10 +152,47 @@ delta tells you what the parser is actually seeing:
 | Repeated `REBOOT cause=...` | Transmitter-side fault; chase that before the wiring |
 
 Collect ~10 cold boots before changing anything, then change **one** thing per
-batch. Candidates, cheapest first: unplug D6 (the current firmware uses the
-hardware UART on D7 only, so the D6 wire is a leftover from the SoftwareSerial
-build and is left undriven into the converter's DI); confirm DE/RE is tied low;
-then the failsafe biasing below.
+batch.
+
+### What the line probe means (calibrated 2026-08-02)
+
+The transmitter reports `line=` whenever no valid frame has arrived for 5 s —
+see the "RS-485 line probe" comment in the sketch. It was calibrated against
+known physical states on the bench:
+
+| `line=` | Verified condition |
+|---|---|
+| `LOW` | Pair open — cable to the Skewered Box unplugged or broken |
+| `driven-high` | Pair connected and idling correctly (box may be off) |
+| `FLOATING` | High-Z at the converter — tri-stated receiver or failed converter |
+| `none` | Probe not running because valid frames are flowing |
+
+So a silent link now identifies itself: `LOW` means go look at the cable,
+`driven-high` means the cable is fine and nothing is being transmitted.
+
+### Findings so far
+
+Two weeks of history (134 boot sessions) plus a bench session ruled out more
+than they confirmed:
+
+- **Not Wi-Fi association.** The debug beacon arrives over the same radio while
+  `rx` sits at zero, so the Pi is associated and the fault is on the serial side.
+- **Not a jammed bus.** A jam would show `rx` climbing with `valid` flat;
+  instead `rx` is flat at zero in nearly every bad session.
+- **Not the UART wedging.** The serial self-heal fired 332 times and only 3 were
+  followed by any valid frame. Re-initialising the port does not recover a link.
+- **Not missing failsafe bias.** With the pair connected the line idles
+  `driven-high` even with the box switched off, which is correct.
+- **Not an obviously intermittent D6/D7 harness.** Deliberate tugging and
+  flexing during a live stream produced no stall over ~60 s: a steady 200
+  valid frames/s throughout.
+
+The bench chain — box, converter, wiring, UART, firmware — is sound, and the
+fault **did not reproduce**. Whatever it is, it is intermittent and needs to be
+caught in the field, which is what the probe and boot-time logging are for.
+
+Note when reading `rx`: the self-heal emits one spurious byte per re-init, so
+`rx` creeping in lockstep with `sr` is an artifact, not line activity.
 
 ## Hardware notes
 
