@@ -463,6 +463,11 @@ def export_bout(con, rec, bout_id):
     return out, None
 
 
+# Frame-arrow auto-repeat. 4 loop iterations at 30 fps is ~7.5 frames/sec,
+# matching the 25% playback speed.
+STEP_HOLD_S = 0.4         # hold this long before scrubbing starts
+STEP_REPEAT_EVERY = 4     # loop iterations between repeats
+
 YT_DESC_MAX = 5000        # YouTube's hard description limit
 YT_DESC_MARGIN = 250      # stay clear of it
 YT_MIN_CHAPTER = 10.0     # a chapter shorter than this voids the WHOLE list
@@ -827,6 +832,8 @@ def main():
     surf = pygame.Surface((REC_W, REC_H))
     frames, t0 = 0, time.time()
     touch_t = None
+    touch_pos = None       # position of the press, held for its whole duration
+    hold_tick = 0          # loop iterations since auto-repeat began
     last_space_check = 0.0
     running = True
 
@@ -1307,9 +1314,12 @@ def main():
                 running = False
             elif e.type == pygame.MOUSEBUTTONDOWN:
                 touch_t = time.time()
+                touch_pos = e.pos       # kept for the whole press, not just the tap
                 tapped = e.pos
             elif e.type == pygame.MOUSEBUTTONUP:
                 touch_t = None
+                touch_pos = None
+                hold_tick = 0
         if mode == MODE_LIVE and touch_t and time.time() - touch_t > 2.0:
             running = False
 
@@ -1323,6 +1333,19 @@ def main():
             # control was hit -- otherwise the slow-motion bar is unusable.
             if action is None and mode == MODE_PLAYBACK:
                 action = ("dismiss",)
+
+        # Hold a frame arrow to scrub. The panel reports a sustained press --
+        # the 2 s hold-to-exit on the live view already depends on it. Repeat
+        # only after STEP_HOLD_S so an ordinary tap is exactly one frame.
+        if (action is None and touch_t and touch_pos and mode == MODE_PLAYBACK
+                and time.time() - touch_t > STEP_HOLD_S):
+            hold_tick += 1
+            if hold_tick % STEP_REPEAT_EVERY == 0:
+                for b in buttons:
+                    if (b.enabled and b.tag and b.tag[0] == "slow_step"
+                            and b.rect.collidepoint(touch_pos)):
+                        action = b.tag
+                        break
 
         # ---------- capture + overlay + record (every mode) ----------
         # A short read means the capture died (camera unplugged, or it was
@@ -1954,37 +1977,42 @@ def main():
             t = font_ui.render(play["banner"] + hint, True, (255, 230, 230))
             screen.blit(t, t.get_rect(center=(400, 15)))
 
-            # ---- control bar (overlaid on the video, no shrink) ----
+            # ---- control bar: overlaid on the video (no shrink), directly
+            # under the 30 px replay banner. The top of frame is usually
+            # ceiling; the bottom is feet, which matter in fencing.
+            BY = 32
             bar = pygame.Surface((800, 56), pygame.SRCALPHA)
             bar.fill((0, 0, 0, 150))
-            screen.blit(bar, (0, 420))
+            screen.blit(bar, (0, BY))
             if play["pending"]:
                 s = font_ui.render("Loading slow motion...", True, (255, 230, 160))
-                screen.blit(s, s.get_rect(center=(400, 448)))
+                screen.blit(s, s.get_rect(center=(400, BY + 28)))
             elif play["menu"]:
                 for i, (lab, div) in enumerate((("10%", 10), ("25%", 4),
                                                 ("50%", 2))):
-                    buttons.append(Button((12 + i * 118, 426, 110, 44), lab,
+                    buttons.append(Button((12 + i * 118, BY + 6, 110, 44), lab,
                                           ("slow_set", div)))
-                buttons.append(Button((660, 426, 130, 44), "CANCEL",
+                buttons.append(Button((660, BY + 6, 130, 44), "CANCEL",
                                       ("slow_menu", False)))
             elif play["frames"]:
-                buttons.append(Button((12, 426, 128, 44),
+                buttons.append(Button((12, BY + 6, 128, 44),
                                       "PLAY" if play["paused"] else "PAUSE",
                                       ("slow_toggle",)))
                 # Stepping implies pausing -- frame-by-frame is somewhere you
                 # fall into from slow motion, not a separate mode to arm.
-                buttons.append(Button((148, 426, 74, 44), "<", ("slow_step", -1)))
-                buttons.append(Button((230, 426, 74, 44), ">", ("slow_step", 1)))
+                buttons.append(Button((148, BY + 6, 74, 44), "<",
+                                      ("slow_step", -1)))
+                buttons.append(Button((230, BY + 6, 74, 44), ">",
+                                      ("slow_step", 1)))
                 pct = {10: "10%", 4: "25%", 2: "50%"}.get(play["speed"], "")
                 s = font_ui.render("%s   frame %d/%d" % (pct, play["idx"] + 1,
                                                         len(play["frames"])),
                                    True, (235, 235, 245))
-                screen.blit(s, s.get_rect(midleft=(320, 448)))
-                buttons.append(Button((612, 426, 178, 44), "< NORMAL",
+                screen.blit(s, s.get_rect(midleft=(320, BY + 28)))
+                buttons.append(Button((612, BY + 6, 178, 44), "< NORMAL",
                                       ("slow_normal",)))
             else:
-                buttons.append(Button((612, 426, 178, 44), "SLOW MOTION",
+                buttons.append(Button((612, BY + 6, 178, 44), "SLOW MOTION",
                                       ("slow_menu", True)))
 
         for b in buttons:
