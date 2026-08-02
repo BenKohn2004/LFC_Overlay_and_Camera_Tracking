@@ -83,6 +83,23 @@ uint32_t validPackets = 0;
 uint32_t sendFails = 0;
 unsigned long lastGoodSend = 0;   // millis of last successful endPacket
 
+// Serial self-heal: if the box line goes silent (boot-order wedge: the
+// converter powering up after the UART leaves RX stuck in a break state),
+// re-initialize the UART + pin until data flows.
+unsigned long lastRxByte = 0;     // millis of last byte from the box
+unsigned long lastReinit = 0;
+uint32_t serialReinits = 0;
+const unsigned long SERIAL_SILENT_REINIT_MS = 10000;
+
+void initBoxSerial() {
+  Serial.end();
+  // pull-up BEFORE begin/swap: the RS-485 converter's output needs RX idled
+  // high, and setting it after the swap re-muxes the pin off the UART
+  pinMode(13, INPUT_PULLUP);
+  Serial.begin(115200);
+  Serial.swap();   // UART0 RX -> GPIO13 = D7 (where the converter is wired)
+}
+
 // ---------------- Helper Functions ----------------
 
 bool isChecksumValid(uint8_t *packet) {
@@ -265,6 +282,7 @@ void Skewered_Parser() {
   while (BoxSerial.available() && millis() - drainStart < 8) {
     byte b = BoxSerial.read();
     rxBytes++;
+    lastRxByte = millis();
 
     if (b == 0xEE) pIdx = 0;
 
@@ -330,19 +348,12 @@ void sendUdpUpdate() {
 // ---------------- Debug telemetry (port 4211) ----------------
 // One packet per second with internal health counters, so a wedge can be
 // diagnosed over the air (the COM5 serial adapter is untrustworthy).
-// Python unpack: struct.unpack("<B6IBBBB", data)  -> 29 bytes
+// Python unpack: struct.unpack("<B6IBBB", data)  -> 28 bytes
 //   magic 0xDD, uptime_ms, loop_count, rx_bytes, valid_packets,
-//   send_fails, free_heap, stations, rst_reason, serial_reinits, line_probe
+//   send_fails, free_heap, stations, rst_reason, serial_reinits (capped 255)
 // rst_reason (ESP8266 rst_info.reason): 0=power-on 1=HW watchdog
 //   2=exception/crash 3=SW watchdog 4=ESP.restart() (our dead-man)
 //   5=deep-sleep wake 6=external reset pin. Brownouts usually show as 0 or 6.
-//
-// serial_reinits is carried so this beacon is a strict SUPERSET of the 28-byte
-// format already flashed on the box (which is not in this repo). This sketch
-// has no serial re-init logic, so it always reports 0 -- when merging into the
-// deployed firmware, wire that build's counter in here. Worth noting the log
-// says 329 of 332 re-inits were followed by no data at all, so the mechanism
-// does not appear to do anything.
 
 const uint16_t DEBUG_PORT = 4211;
 uint8_t g_rst_reason = 0;      // captured once in setup()
@@ -357,73 +368,8 @@ struct __attribute__((packed)) DebugMessage {
   uint32_t free_heap;
   uint8_t stations;
   uint8_t rst_reason;
-  uint8_t serial_reinits;   // always 0 in this build -- see note above
-  uint8_t line_probe;       // see "RS-485 line probe" below
+  uint8_t serial_reinits;
 };
-
-// ---------------- RS-485 line probe ----------------
-// Tells apart "the scoring box is switched off" from "the link is broken".
-// In the telemetry those are indistinguishable: rx_bytes simply stops moving.
-// GPIO13 idles high either way, because setup() holds it there with the
-// internal pull-up -- a disconnected wire and a converter driving an idle mark
-// level read exactly the same.
-//
-// So drop the pull-up and see what the line does unaided:
-//   stable HIGH -> something is actively driving the mark level: the converter
-//                  is powered and working, the box is merely idle/off
-//   stable LOW  -> line held low: break condition, or the pair is swapped
-//   unstable    -> high impedance, nothing driving it at all: a broken
-//                  connection, or the receiver is tri-stated (RE not held low)
-//
-// Caveat: the ESP8266 has no internal pull-down on GPIO13 (only GPIO16), so
-// this is a floating-vs-driven heuristic, not a clean three-state read. Stray
-// capacitance can hold a disconnected line at its last level; sampling across
-// ~1.6 ms makes that unlikely but not impossible.
-//
-// pinMode() on GPIO13 re-muxes the pin away from UART0 RX -- the same trap
-// setup() warns about -- so the probe re-runs begin()+swap() afterwards. It is
-// therefore gated on the link ALREADY being idle: with nothing to receive,
-// briefly dropping the UART costs nothing.
-
-// Idleness is measured in VALID FRAMES, not raw bytes. A line with absent or
-// weak failsafe biasing trickles noise -- observed at ~10 bytes/s with zero
-// valid frames -- and gating on raw bytes would reset the timer every second,
-// so the probe would never fire in exactly the case worth diagnosing. The box
-// emits valid frames continuously whenever it is powered, so "no valid frame
-// for 5 s" means the link is genuinely not delivering and there is nothing for
-// the probe to corrupt.
-const unsigned long PROBE_IDLE_MS = 5000;     // no valid frame for this long
-const unsigned long PROBE_PERIOD_MS = 10000;  // and re-probe no faster than this
-
-enum : uint8_t {
-  PROBE_NONE = 0,    // not run -- the link is live, nothing to diagnose
-  PROBE_FLOAT = 1,   // high-Z: broken connection or tri-stated receiver
-  PROBE_HIGH = 2,    // driven mark: converter alive, box idle
-  PROBE_LOW = 3,     // held low: break condition or mis-wired pair
-};
-
-uint8_t g_line_probe = PROBE_NONE;
-uint32_t lastValidCount = 0;
-unsigned long lastValidChange = 0;
-unsigned long lastProbe = 0;
-
-void probeLine() {
-  const int SAMPLES = 32;
-  pinMode(13, INPUT);          // drop the pull-up (also un-muxes UART0 RX)
-  delayMicroseconds(200);      // let the node settle
-  int high = 0;
-  for (int i = 0; i < SAMPLES; i++) {
-    if (digitalRead(13)) high++;
-    delayMicroseconds(50);
-  }
-  pinMode(13, INPUT_PULLUP);   // restore the idle bias...
-  Serial.begin(115200);        // ...and put UART0 back on GPIO13
-  Serial.swap();
-
-  if (high == SAMPLES) g_line_probe = PROBE_HIGH;
-  else if (high == 0) g_line_probe = PROBE_LOW;
-  else g_line_probe = PROBE_FLOAT;
-}
 
 void sendDebug() {
   DebugMessage d;
@@ -436,8 +382,7 @@ void sendDebug() {
   d.free_heap = ESP.getFreeHeap();
   d.stations = WiFi.softAPgetStationNum();
   d.rst_reason = g_rst_reason;
-  d.serial_reinits = 0;        // this build has no re-init logic
-  d.line_probe = g_line_probe;
+  d.serial_reinits = serialReinits > 255 ? 255 : serialReinits;
   Udp.beginPacket(udpTarget(), DEBUG_PORT);
   Udp.write((uint8_t *)&d, sizeof(d));
   Udp.endPacket();
@@ -447,14 +392,7 @@ void sendDebug() {
 
 void setup() {
   g_rst_reason = ESP.getResetInfoPtr()->reason;   // why the last boot ended
-  // The RS-485/TTL converter's output needs the RX pin pulled up to idle high
-  // (SoftwareSerial did this automatically; the bare UART does not, so rx read
-  // as a dead line). Set the pull-up on GPIO13 BEFORE the swap: doing it after
-  // re-muxes the pin to plain GPIO and disconnects the UART. The pull-up bit
-  // survives the swap; the function bits get set to UART RX by swap().
-  pinMode(13, INPUT_PULLUP);
-  Serial.begin(115200);
-  Serial.swap();   // move UART0 to GPIO15(TX)/GPIO13(RX=D7) -> reads the box
+  initBoxSerial();   // UART on D7 with RX pull-up; also used by the self-heal
   // (BoxSerial is a reference to Serial, so it is already started + swapped)
 
 #if USE_SOFTAP
@@ -513,23 +451,19 @@ void loop() {
   Skewered_Parser();
 
   unsigned long dnow = millis();
-
-  // Probe the RS-485 line only once valid frames have stopped. While the link
-  // is delivering there is nothing to diagnose, and the probe would corrupt
-  // the reception it interrupts.
-  if (validPackets != lastValidCount) {
-    lastValidCount = validPackets;
-    lastValidChange = dnow;
-    g_line_probe = PROBE_NONE;
-  }
-  if (dnow - lastValidChange > PROBE_IDLE_MS && dnow - lastProbe > PROBE_PERIOD_MS) {
-    probeLine();
-    lastProbe = dnow;
-  }
-
   if (dnow - lastDebugTx >= 1000) {
     sendDebug();
     lastDebugTx = dnow;
+  }
+
+  // serial self-heal: the box streams constantly, so 10 s of silence means
+  // the UART is wedged (or the wire/converter is out) -- re-init and retry
+  // every 10 s until bytes flow again; harmless if the line is just unplugged
+  if (dnow - lastRxByte >= SERIAL_SILENT_REINIT_MS &&
+      dnow - lastReinit >= SERIAL_SILENT_REINIT_MS) {
+    initBoxSerial();
+    lastReinit = dnow;
+    serialReinits++;
   }
 
   // dead-man switch: sends should succeed many times per second; a long
