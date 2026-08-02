@@ -1251,14 +1251,44 @@ def main():
                "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=PFRAME)
         return {"proc": proc, "cmd": cmd, "banner": banner,
-                "from_mode": from_mode, "last": None}
+                "from_mode": from_mode, "last": None,
+                # slow-motion state; frames is None until slow-mo is entered
+                "speed": None, "paused": False, "frames": None,
+                "idx": 0, "tick": 0, "menu": False, "pending": None}
+
+    def load_clip_frames(p):
+        """Decode the whole clip into memory for slow-motion playback.
+
+        Normal replay streams from ffmpeg one frame per loop, which cannot be
+        rewound -- so stepping backwards needs the frames held. A clip is 6 s
+        at 800x450, about 194 MB, against 7 GB free on this Pi. Paid only when
+        slow motion is entered, so ordinary replay is untouched.
+        """
+        try:
+            proc = subprocess.Popen(p["cmd"], stdout=subprocess.PIPE,
+                                    bufsize=PFRAME)
+        except OSError:
+            return None
+        out = []
+        while True:
+            buf = proc.stdout.read(PFRAME)
+            if len(buf) < PFRAME:
+                break
+            out.append(pygame.image.frombuffer(buf, (DISP_W, DISP_H), "RGB"))
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return out or None
 
     def stop_playback(p):
-        if p and p["proc"]:
+        if p and p.get("proc"):
             try:
                 p["proc"].kill()
             except Exception:
                 pass
+        if p:
+            p["frames"] = None      # release the slow-motion buffer
 
     def last_touch():
         return con.execute(
@@ -1285,13 +1315,14 @@ def main():
 
         action = None
         if tapped:
-            if mode == MODE_PLAYBACK:
+            for b in buttons:
+                if b.enabled and b.rect.collidepoint(tapped):
+                    action = b.tag
+                    break
+            # Playback keeps "tap anywhere to close", but only where no
+            # control was hit -- otherwise the slow-motion bar is unusable.
+            if action is None and mode == MODE_PLAYBACK:
                 action = ("dismiss",)
-            else:
-                for b in buttons:
-                    if b.enabled and b.rect.collidepoint(tapped):
-                        action = b.tag
-                        break
 
         # ---------- capture + overlay + record (every mode) ----------
         # A short read means the capture died (camera unplugged, or it was
@@ -1407,6 +1438,33 @@ def main():
                 else:
                     touch_page = max(0, min(touch_page + action[1],
                                             (len(touch_rows) - 1) // ROWS_PER_PAGE))
+            elif action[0] == "slow_menu":
+                play["menu"] = bool(action[1])
+            elif action[0] == "slow_set":
+                # Decode on the NEXT iteration so "Loading slow motion..."
+                # actually reaches the screen first -- the decode blocks the
+                # loop for a second or so and would otherwise look like a hang.
+                play["pending"] = action[1]
+                play["menu"] = False
+            elif action[0] == "slow_normal":
+                play["frames"] = None
+                play["speed"] = None
+                play["paused"] = False
+                play["menu"] = False
+                try:
+                    play["proc"].kill()
+                except Exception:
+                    pass
+                play["proc"] = subprocess.Popen(play["cmd"],
+                                                stdout=subprocess.PIPE,
+                                                bufsize=PFRAME)
+            elif action[0] == "slow_toggle":
+                play["paused"] = not play["paused"]
+            elif action[0] == "slow_step":
+                play["paused"] = True
+                if play["frames"]:
+                    play["idx"] = ((play["idx"] + action[1])
+                                   % len(play["frames"]))
             elif action[0] == "ask_delete_bout":
                 n_touch = con.execute(
                     "SELECT COUNT(*) FROM events WHERE bout_id=? AND type='touch'",
@@ -1576,6 +1634,20 @@ def main():
                 mode = MODE_LIVE
 
         # a real touch at the strip interrupts any replay
+        # Deferred slow-motion load: the "Loading" frame has now been shown.
+        if mode == MODE_PLAYBACK and play and play["pending"]:
+            div, play["pending"] = play["pending"], None
+            fr = load_clip_frames(play)
+            if fr:
+                play["frames"], play["speed"] = fr, div
+                play["idx"], play["tick"], play["paused"] = 0, 0, False
+                try:
+                    play["proc"].kill()   # streaming copy no longer needed
+                except Exception:
+                    pass
+            else:
+                flash = ("Could not load slow motion", now + 2)
+
         if mode == MODE_PLAYBACK and new_touch:
             stop_playback(play)
             mode, play = MODE_LIVE, None
@@ -1850,30 +1922,74 @@ def main():
             buttons.append(Button((684, ky, 110, 62), "OK", ("wifi_ok",)))
 
         elif mode == MODE_PLAYBACK:
-            pbuf = play["proc"].stdout.read(PFRAME)
-            if len(pbuf) < PFRAME:
-                # clip ended: loop it (restart the decode; user exits by tap)
-                stop_playback(play)
-                play["proc"] = subprocess.Popen(play["cmd"],
-                                                stdout=subprocess.PIPE,
-                                                bufsize=PFRAME)
-                pimg = play["last"]      # hold last frame over the seek gap
+            if play["frames"]:
+                # Slow motion: the loop already runs at 30 fps, so showing each
+                # frame for N iterations IS 1/N speed -- no re-encode, no seek.
+                if not play["paused"]:
+                    play["tick"] += 1
+                    if play["tick"] % play["speed"] == 0:
+                        play["idx"] = (play["idx"] + 1) % len(play["frames"])
+                pimg = play["frames"][play["idx"]]
             else:
-                pimg = pygame.image.frombuffer(pbuf, (DISP_W, DISP_H), "RGB")
-                play["last"] = pimg
+                pbuf = play["proc"].stdout.read(PFRAME)
+                if len(pbuf) < PFRAME:
+                    # clip ended: loop it (restart the decode; user exits by tap)
+                    try:
+                        play["proc"].kill()
+                    except Exception:
+                        pass
+                    play["proc"] = subprocess.Popen(play["cmd"],
+                                                    stdout=subprocess.PIPE,
+                                                    bufsize=PFRAME)
+                    pimg = play["last"]  # hold last frame over the seek gap
+                else:
+                    pimg = pygame.image.frombuffer(pbuf, (DISP_W, DISP_H), "RGB")
+                    play["last"] = pimg
             if pimg is not None:
                 screen.blit(pimg, (0, YOFF))
             ban = pygame.Surface((800, 30), pygame.SRCALPHA)
             ban.fill((120, 30, 30, 200))
             screen.blit(ban, (0, 0))
-            t = font_ui.render(play["banner"] + "   (tap to close)", True,
-                               (255, 230, 230))
+            hint = "" if play["frames"] else "   (tap to close)"
+            t = font_ui.render(play["banner"] + hint, True, (255, 230, 230))
             screen.blit(t, t.get_rect(center=(400, 15)))
 
-        if mode != MODE_PLAYBACK:
-            for b in buttons:
-                if b.label:
-                    b.draw(screen, font_ui)
+            # ---- control bar (overlaid on the video, no shrink) ----
+            bar = pygame.Surface((800, 56), pygame.SRCALPHA)
+            bar.fill((0, 0, 0, 150))
+            screen.blit(bar, (0, 420))
+            if play["pending"]:
+                s = font_ui.render("Loading slow motion...", True, (255, 230, 160))
+                screen.blit(s, s.get_rect(center=(400, 448)))
+            elif play["menu"]:
+                for i, (lab, div) in enumerate((("10%", 10), ("25%", 4),
+                                                ("50%", 2))):
+                    buttons.append(Button((12 + i * 118, 426, 110, 44), lab,
+                                          ("slow_set", div)))
+                buttons.append(Button((660, 426, 130, 44), "CANCEL",
+                                      ("slow_menu", False)))
+            elif play["frames"]:
+                buttons.append(Button((12, 426, 128, 44),
+                                      "PLAY" if play["paused"] else "PAUSE",
+                                      ("slow_toggle",)))
+                # Stepping implies pausing -- frame-by-frame is somewhere you
+                # fall into from slow motion, not a separate mode to arm.
+                buttons.append(Button((148, 426, 74, 44), "<", ("slow_step", -1)))
+                buttons.append(Button((230, 426, 74, 44), ">", ("slow_step", 1)))
+                pct = {10: "10%", 4: "25%", 2: "50%"}.get(play["speed"], "")
+                s = font_ui.render("%s   frame %d/%d" % (pct, play["idx"] + 1,
+                                                        len(play["frames"])),
+                                   True, (235, 235, 245))
+                screen.blit(s, s.get_rect(midleft=(320, 448)))
+                buttons.append(Button((612, 426, 178, 44), "< NORMAL",
+                                      ("slow_normal",)))
+            else:
+                buttons.append(Button((612, 426, 178, 44), "SLOW MOTION",
+                                      ("slow_menu", True)))
+
+        for b in buttons:
+            if b.label:
+                b.draw(screen, font_ui)
         if flash and now < flash[1]:
             t = font_ui.render(flash[0], True, (255, 210, 120))
             screen.blit(t, t.get_rect(center=(400, 460)))
