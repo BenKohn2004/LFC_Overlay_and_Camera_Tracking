@@ -100,6 +100,66 @@ void initBoxSerial() {
   Serial.swap();   // UART0 RX -> GPIO13 = D7 (where the converter is wired)
 }
 
+// ---------------- RS-485 line probe ----------------
+// Tells apart "the scoring box is switched off" from "the link is broken".
+// In the telemetry those are indistinguishable: valid frames simply stop.
+// GPIO13 idles high either way, because initBoxSerial() holds it there with
+// the internal pull-up -- a disconnected wire and a converter driving an idle
+// mark level read exactly the same.
+//
+// So drop the pull-up and see what the line does unaided:
+//   stable HIGH -> something is actively driving the mark level: the converter
+//                  is powered and working, the box is merely idle/off
+//   stable LOW  -> line held low: break condition, or the pair is swapped
+//   unstable    -> high impedance, nothing driving it at all: a broken
+//                  connection, or the receiver is tri-stated (RE not held low)
+//
+// Caveat: the ESP8266 has no internal pull-down on GPIO13 (only GPIO16), so
+// this is a floating-vs-driven heuristic, not a clean three-state read. Stray
+// capacitance can hold a disconnected line at its last level; sampling across
+// ~1.6 ms makes that unlikely but not impossible.
+//
+// pinMode() on GPIO13 re-muxes the pin off the UART -- the same trap
+// initBoxSerial() warns about -- so the probe finishes by calling it.
+//
+// Idleness is measured in VALID FRAMES, not raw bytes. A line with absent or
+// weak failsafe biasing trickles noise (observed at ~10 bytes/s with zero
+// valid frames), and gating on raw bytes would reset the timer every second,
+// so the probe would never fire in exactly the case worth diagnosing. Note
+// this differs from the self-heal above, which deliberately gates on raw
+// bytes because any byte proves the UART itself is alive.
+
+const unsigned long PROBE_IDLE_MS = 5000;     // no valid frame for this long
+const unsigned long PROBE_PERIOD_MS = 10000;  // and re-probe no faster than this
+
+enum : uint8_t {
+  PROBE_NONE = 0,    // not run -- the link is delivering, nothing to diagnose
+  PROBE_FLOAT = 1,   // high-Z: broken connection or tri-stated receiver
+  PROBE_HIGH = 2,    // driven mark: converter alive, box idle
+  PROBE_LOW = 3,     // held low: break condition or mis-wired pair
+};
+
+uint8_t g_line_probe = PROBE_NONE;
+uint32_t lastValidCount = 0;
+unsigned long lastValidChange = 0;
+unsigned long lastProbe = 0;
+
+void probeLine() {
+  const int SAMPLES = 32;
+  pinMode(13, INPUT);          // drop the pull-up (also re-muxes off the UART)
+  delayMicroseconds(200);      // let the node settle
+  int high = 0;
+  for (int i = 0; i < SAMPLES; i++) {
+    if (digitalRead(13)) high++;
+    delayMicroseconds(50);
+  }
+  initBoxSerial();             // restore pull-up + UART0 on GPIO13
+
+  if (high == SAMPLES) g_line_probe = PROBE_HIGH;
+  else if (high == 0) g_line_probe = PROBE_LOW;
+  else g_line_probe = PROBE_FLOAT;
+}
+
 // ---------------- Helper Functions ----------------
 
 bool isChecksumValid(uint8_t *packet) {
@@ -348,9 +408,10 @@ void sendUdpUpdate() {
 // ---------------- Debug telemetry (port 4211) ----------------
 // One packet per second with internal health counters, so a wedge can be
 // diagnosed over the air (the COM5 serial adapter is untrustworthy).
-// Python unpack: struct.unpack("<B6IBBB", data)  -> 28 bytes
+// Python unpack: struct.unpack("<B6IBBBB", data)  -> 29 bytes
 //   magic 0xDD, uptime_ms, loop_count, rx_bytes, valid_packets,
-//   send_fails, free_heap, stations, rst_reason, serial_reinits (capped 255)
+//   send_fails, free_heap, stations, rst_reason, serial_reinits (capped 255),
+//   line_probe
 // rst_reason (ESP8266 rst_info.reason): 0=power-on 1=HW watchdog
 //   2=exception/crash 3=SW watchdog 4=ESP.restart() (our dead-man)
 //   5=deep-sleep wake 6=external reset pin. Brownouts usually show as 0 or 6.
@@ -369,6 +430,7 @@ struct __attribute__((packed)) DebugMessage {
   uint8_t stations;
   uint8_t rst_reason;
   uint8_t serial_reinits;
+  uint8_t line_probe;      // see "RS-485 line probe" below
 };
 
 void sendDebug() {
@@ -383,6 +445,7 @@ void sendDebug() {
   d.stations = WiFi.softAPgetStationNum();
   d.rst_reason = g_rst_reason;
   d.serial_reinits = serialReinits > 255 ? 255 : serialReinits;
+  d.line_probe = g_line_probe;
   Udp.beginPacket(udpTarget(), DEBUG_PORT);
   Udp.write((uint8_t *)&d, sizeof(d));
   Udp.endPacket();
@@ -451,6 +514,20 @@ void loop() {
   Skewered_Parser();
 
   unsigned long dnow = millis();
+
+  // Probe the RS-485 line once valid frames have stopped. While the link is
+  // delivering there is nothing to diagnose, and the probe would corrupt the
+  // reception it interrupts.
+  if (validPackets != lastValidCount) {
+    lastValidCount = validPackets;
+    lastValidChange = dnow;
+    g_line_probe = PROBE_NONE;
+  }
+  if (dnow - lastValidChange > PROBE_IDLE_MS && dnow - lastProbe > PROBE_PERIOD_MS) {
+    probeLine();
+    lastProbe = dnow;
+  }
+
   if (dnow - lastDebugTx >= 1000) {
     sendDebug();
     lastDebugTx = dnow;
