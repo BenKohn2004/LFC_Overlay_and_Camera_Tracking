@@ -30,7 +30,10 @@ except ImportError:          # station still runs without the uploader
     yt_upload = None
 
 # ---------------- config ----------------
-FMT = "<B6s4I12?32s"
+FMT = "<B6s4I12?32s"          # 67 bytes: transmitters without hit age
+FMT_AGE = "<B6s4I12?32sHH"    # 71 bytes: + left/right ms since the hit
+LEN_PLAIN = struct.calcsize(FMT)
+LEN_AGE = struct.calcsize(FMT_AGE)
 UDP_PORT = 4210
 REC_W, REC_H = 1280, 720
 DISP_W, DISP_H = 800, 450
@@ -73,7 +76,8 @@ LOGO_D = 120               # diameter in canvas px
 PINNED_CLUBS = ["USA"]     # always offered in the picker (besides "None")
 
 # ---------------- shared telemetry state ----------------
-state = {"l": 0, "r": 0, "min": 0, "sec": 0, "flags": [False] * 12, "age": None}
+state = {"l": 0, "r": 0, "min": 0, "sec": 0, "flags": [False] * 12, "age": None,
+         "hit_age": None}
 _lock = threading.Lock()
 last_activity = [0.0]
 pending_events = []
@@ -121,9 +125,18 @@ def udp_thread():
             data, _ = s.recvfrom(1024)
         except socket.timeout:
             continue
-        if len(data) != struct.calcsize(FMT):
+        # Accept both payload versions so the transmitter and the Pi can be
+        # upgraded in either order -- a length mismatch here drops EVERY packet
+        # and the station just shows "NO BOX SIGNAL", which is a miserable way
+        # to discover a version skew.
+        if len(data) == LEN_AGE:
+            f = struct.unpack(FMT_AGE, data)
+            hit_age = (f[19], f[20])
+        elif len(data) == LEN_PLAIN:
+            f = struct.unpack(FMT, data)
+            hit_age = None            # transmitter predates the hit-age field
+        else:
             continue
-        f = struct.unpack(FMT, data)
         now = time.time()
         r, l, sec, mn = f[2], f[3], f[4], f[5]
         flags = list(f[6:18])
@@ -132,6 +145,7 @@ def udp_thread():
             state["sec"], state["min"] = sec, mn
             state["flags"] = flags
             state["age"] = now
+            state["hit_age"] = hit_age   # (left_ms, right_ms) or None
 
             if prev is None:
                 prev = (l, r, mn, sec, flags)

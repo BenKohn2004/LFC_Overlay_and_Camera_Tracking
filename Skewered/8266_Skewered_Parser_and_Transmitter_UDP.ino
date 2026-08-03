@@ -46,11 +46,15 @@ WiFiUDP Udp;
 HardwareSerial &BoxSerial = Serial;
 
 // ---------------- UDP Payload ----------------
-// Same packed layout as the ESP-NOW version: 67 bytes total.
+// 71 bytes total (was 67 before the hit-age fields were appended).
 // Python (Raspberry Pi) unpack:
 //   import struct
-//   fmt = "<B6s4I12?32s"   # msgType, mac, R/L score, sec, min, 12 flags, name
+//   fmt = "<B6s4I12?32sHH"  # msgType, mac, R/L score, sec, min, 12 flags,
+//                           # name, left hit age, right hit age
 //   fields = struct.unpack(fmt, data)
+// Appended at the END so the older 67-byte layout stays a prefix of this one:
+// receivers can accept both lengths and there is no upgrade ordering to get
+// wrong.
 struct __attribute__((packed)) FaveroMessage {
   uint8_t msgType;
   uint8_t macAddr[6];
@@ -71,7 +75,16 @@ struct __attribute__((packed)) FaveroMessage {
   bool Priority_Left;
   bool Priority_Right;
   char customMessage[32];
+  // Milliseconds since the hit on each side, brought up to date at transmit
+  // time (see sendUdpUpdate). 0 = no hit on that side.
+  uint16_t Left_Hit_Age;
+  uint16_t Right_Hit_Age;
 };
+
+// The Pi unpacks by exact byte count, so a struct change that slips through
+// unnoticed would silently drop every packet. Make it a compile error instead.
+static_assert(sizeof(FaveroMessage) == 71,
+              "payload size changed - update FMT on the Pi to match");
 
 FaveroMessage myData;
 bool new_data = false;
@@ -293,6 +306,29 @@ void decodeScores(byte leftByte, byte rightByte) {
   }
 }
 
+// ---------------- Hit age (protocol bytes 7-9 = frame indices 8-10) --------
+// Two 10-bit timing values, 0-999 ms, 0 when that side has no hit:
+//   byte7 | 0 LLLLLLL |    high 7 bits of LEFT
+//   byte8 | LLL 00 RRR |   low 3 bits of LEFT, then high 3 bits of RIGHT
+//   byte9 | RRRRRRR 0 |    low 7 bits of RIGHT
+// For a valid hit this is elapsed milliseconds since the hit; for
+// short/whipover it is the duration; for a late hit it is time since lockout.
+//
+// This is what makes overlay/video alignment tractable. The box streams state
+// every ~5 ms while this transmitter deliberately throttles to 10-33 Hz, so a
+// light's arrival time at the Pi says little about when it actually happened.
+// The age travels with the packet and is true regardless of that throttling
+// or of Wi-Fi jitter.
+uint16_t g_hit_age_l = 0;
+uint16_t g_hit_age_r = 0;
+unsigned long g_hit_age_at = 0;   // millis() when the two values above were read
+
+void decodeHitAge(byte b7, byte b8, byte b9) {
+  g_hit_age_l = (uint16_t)(((b7 & 0x7F) << 3) | ((b8 >> 5) & 0x07));
+  g_hit_age_r = (uint16_t)(((b8 & 0x07) << 7) | ((b9 >> 1) & 0x7F));
+  g_hit_age_at = millis();
+}
+
 void decodeLights(byte index7) {
   if (VERBOSE) {
     Serial.print("Byte 7 Bits: [");
@@ -354,6 +390,13 @@ void Skewered_Parser() {
       if (isChecksumValid(currentPacket) && currentPacket[15] == 0xFF) {
         validPackets++;
 
+        // Track the hit age on EVERY valid packet, not only changed ones. The
+        // change detector below deliberately skips indices 8-10 (they tick at
+        // 200 Hz and would make every packet look different), but the age has
+        // to be current or it is worthless -- decoding it only on change would
+        // freeze it at the value it happened to have when the lights latched.
+        decodeHitAge(currentPacket[8], currentPacket[9], currentPacket[10]);
+
         bool isDifferent = false;
         for (int i = 0; i < 16; i++) {
           // Ignore header, sync, time bytes, and checksum
@@ -393,6 +436,15 @@ void Skewered_Parser() {
 // ---------------- UDP Transmit ----------------
 
 void sendUdpUpdate() {
+  // Age the hit forward by however long we sat on it. The box's number was
+  // true when IT sent the packet; between then and now this transmitter may
+  // have waited up to MIN_TX_GAP_MS, or a whole heartbeat. Adding that wait
+  // back is the entire point -- it cancels the throttling delay instead of
+  // baking it into the value, leaving only Wi-Fi flight time as error.
+  unsigned long held = millis() - g_hit_age_at;
+  myData.Left_Hit_Age = g_hit_age_l ? (uint16_t)(g_hit_age_l + held) : 0;
+  myData.Right_Hit_Age = g_hit_age_r ? (uint16_t)(g_hit_age_r + held) : 0;
+
   Udp.beginPacket(udpTarget(), UDP_PORT);
   Udp.write((uint8_t *)&myData, sizeof(myData));
   int result = Udp.endPacket();
