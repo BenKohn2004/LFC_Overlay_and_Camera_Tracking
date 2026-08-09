@@ -295,25 +295,12 @@ class Recorder:
         self._new_bout(now, 0.0)
         self.con.commit()
         pattern = os.path.join(RECDIR, "rec_%Y-%m-%d_%H-%M-%S.mp4")
-        # MJPEG rather than x264. Not for speed -- measured on this Pi they are
-        # the same, 122 vs 119 fps -- but because MJPEG's cost per frame is
-        # CONSTANT. x264 spends more on motion and much more on a keyframe, and
-        # a slow frame here stalls the whole capture loop: a composited frame
-        # is 2.76 MB written into a 64 KB pipe, so the loop runs at the
-        # encoder's pace. Stalls let frames queue upstream in v4l2, and since
-        # the loop can only ever match 30 fps it never drains that backlog.
-        # Measured effect: overlay-vs-video offset jittering over a 200 ms
-        # range between touches seconds apart.
-        #
-        # yuvj420p matters. MJPEG defaults to 4:4:4 from an rgb24 input, which
-        # costs 13.1 Mbps and drops to 2.79x headroom; subsampled it is
-        # 7.4 Mbps at 4.08x. Roughly 13 hours on this card -- past the battery,
-        # and the workflow is record-then-upload rather than archive.
-        # Every frame being a keyframe also makes replay seeks exact.
         cmd = ["ffmpeg", "-loglevel", "error",
                "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", "%dx%d" % (REC_W, REC_H), "-r", str(FPS), "-i", "-",
-               "-c:v", "mjpeg", "-q:v", "7", "-pix_fmt", "yuvj420p",
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+               "-pix_fmt", "yuv420p", "-g", str(FPS * 2),
+               "-force_key_frames", "expr:gte(t,n_forced*%d)" % SEGMENT_SECS,
                "-f", "segment", "-segment_time", str(SEGMENT_SECS),
                "-reset_timestamps", "1", "-strftime", "1",
                "-segment_format", "mp4",
@@ -475,9 +462,9 @@ def export_bout(con, rec, bout_id):
         r = subprocess.run(
             ["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe",
              "0", "-i", lst, "-ss", "%.2f" % (start - use[0][0]),
-             "-t", "%.2f" % (end - start)] + UPLOAD_ENC + [
+             "-t", "%.2f" % (end - start), "-c", "copy",
              "-movflags", "+faststart", out],
-            capture_output=True, timeout=900)
+            capture_output=True, timeout=300)
     finally:
         try:
             os.remove(lst)
@@ -494,16 +481,6 @@ def export_bout(con, rec, bout_id):
 # matching the 25% playback speed.
 STEP_HOLD_S = 0.4         # hold this long before scrubbing starts
 STEP_REPEAT_EVERY = 4     # loop iterations between repeats
-
-# Recordings are MJPEG (see Recorder.start), which is deliberately cheap and
-# constant-cost to WRITE but roughly 3x the size of H.264 to SEND. Exports are
-# therefore re-encoded rather than stream-copied: the encoding moves off the
-# real-time capture path, where a stalled frame corrupts overlay sync, and onto
-# the after-practice upload step, where nothing is time-critical. Measured at
-# ~120 fps on this Pi, so a 32-minute combined video re-encodes in about 8
-# minutes -- alongside a wifi join and an upload that already take longer.
-UPLOAD_ENC = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-              "-pix_fmt", "yuv420p"]
 
 YT_DESC_MAX = 5000        # YouTube's hard description limit
 YT_DESC_MARGIN = 250      # stay clear of it
@@ -634,9 +611,6 @@ def build_combined(con, rec, bout_ids):
         for _bid, p, _d in parts:
             fh.write("file '%s'\n" % p.replace("'", "'\\''"))
     try:
-        # Stream copy is right HERE: every part was already re-encoded to
-        # H.264 by export_bout with identical settings, so concatenating them
-        # needs no second encode. The transcode happens once, per bout.
         r = subprocess.run(
             ["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
              "-i", lst, "-c", "copy", "-movflags", "+faststart", out],
