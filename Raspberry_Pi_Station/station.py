@@ -1228,6 +1228,51 @@ def main():
                 except OSError:
                     pass
 
+    def wipe_stats():
+        """(bouts, touches, not_yet_uploaded, video_bytes) for the confirm text."""
+        nb = con.execute("SELECT COUNT(*) FROM bouts").fetchone()[0]
+        nt = con.execute("SELECT COUNT(*) FROM events WHERE type='touch'").fetchone()[0]
+        nu = con.execute("SELECT COUNT(*) FROM bouts b WHERE b.youtube_id='' AND"
+                         " EXISTS (SELECT 1 FROM events e WHERE e.bout_id=b.id"
+                         " AND e.type='touch')").fetchone()[0]
+        vb = 0
+        for d in (RECDIR, UPLOAD_DIR):
+            try:
+                for f in os.listdir(d):
+                    if f.endswith(".mp4"):
+                        vb += os.path.getsize(os.path.join(d, f))
+            except OSError:
+                pass
+        return nb, nt, nu, vb
+
+    def delete_all(with_video):
+        """Clear the bout history. With with_video, reclaim the footage too.
+
+        Single-bout delete deliberately spares the recordings because segments
+        are shared between bouts in a session. That reasoning does not apply
+        here: if every bout goes, no segment is referenced by anything, so the
+        footage can be reclaimed. Kept either way: fencer names, club logos and
+        the YouTube token -- this clears recordings, not configuration.
+        """
+        con.execute("DELETE FROM events")
+        con.execute("DELETE FROM bouts")
+        if with_video:
+            con.execute("DELETE FROM state_log")
+            con.execute("DELETE FROM files")
+            con.execute("DELETE FROM sessions")
+        con.commit()
+        dirs = [UPLOAD_DIR] + ([RECDIR] if with_video else [])
+        for d in dirs:
+            try:
+                for f in os.listdir(d):
+                    if f.endswith(".mp4") or f.endswith(".csv"):
+                        try:
+                            os.remove(os.path.join(d, f))
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+
     def load_bouts():
         rows = con.execute("""
             SELECT b.id, b.session_id, b.start_ts, b.l_name, b.r_name,
@@ -1513,6 +1558,34 @@ def main():
                 if play["frames"]:
                     play["idx"] = ((play["idx"] + action[1])
                                    % len(play["frames"]))
+            elif action[0] == "ask_delete_all":
+                nb, nt, nu, vb = wipe_stats()
+                if not nb:
+                    flash = ("No bouts to delete", now + 2)
+                else:
+                    lines = ["%d bouts, %d touches" % (nb, nt)]
+                    # The one fact that prevents the expensive mistake.
+                    if nu:
+                        lines.append("%d NOT YET UPLOADED" % nu)
+                    else:
+                        lines.append("all uploaded or skipped")
+                    lines.append("Video on disk: %.1f GB" % (vb / 1e9))
+                    confirm = {
+                        "title": "Delete ALL bouts?",
+                        "lines": lines,
+                        "choices": [("BOUTS", ("do_delete_all", 0)),
+                                    ("+ VIDEO", ("do_delete_all", 1))],
+                        "from": MODE_BOUTS}
+                    mode = MODE_CONFIRM
+            elif action[0] == "do_delete_all":
+                confirm = None
+                with_video = bool(action[1])
+                delete_all(with_video)
+                bout_rows, bout_page = load_bouts(), 0
+                touch_rows, cur_bout = [], None
+                mode = MODE_BOUTS
+                flash = ("All bouts deleted" + (" and video reclaimed"
+                                                if with_video else ""), now + 3)
             elif action[0] == "ask_delete_bout":
                 n_touch = con.execute(
                     "SELECT COUNT(*) FROM events WHERE bout_id=? AND type='touch'",
@@ -1779,6 +1852,11 @@ def main():
                                           export_job["total"]),
                     True, (255, 210, 120)), (560, 18))
             elif mode == MODE_BOUTS:
+                # Disabled while recording: wiping the footage would pull files
+                # out from under the running encoder.
+                buttons.append(Button((296, 4, 126, 40), "DELETE ALL",
+                                      ("ask_delete_all",),
+                                      enabled=not rec.active))
                 buttons.append(Button((430, 4, 104, 40), "WIFI",
                                       ("wifi_open",)))
                 buttons.append(Button((560, 4, 172, 40), "UPLOAD ALL",
