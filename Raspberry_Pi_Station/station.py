@@ -298,6 +298,12 @@ class Recorder:
         cmd = ["ffmpeg", "-loglevel", "error",
                "-f", "rawvideo", "-pix_fmt", "rgb24",
                "-s", "%dx%d" % (REC_W, REC_H), "-r", str(FPS), "-i", "-",
+               # veryfast, not ultrafast. ultrafast was tried against the live
+               # latency and halved the encoder's CPU (127% -> 55%) without
+               # moving the loop rate at all (29.44 -> 29.47 fps), which is
+               # what showed the encoder was never the bottleneck -- the
+               # capture side was. It costs ~2x the file size, so there is no
+               # reason to keep it.
                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                "-pix_fmt", "yuv420p", "-g", str(FPS * 2),
                "-force_key_frames", "expr:gte(t,n_forced*%d)" % SEGMENT_SECS,
@@ -788,11 +794,16 @@ def open_camera():
     """
     if not os.path.exists(CAM_DEV):
         return None
+    # Capture natively at the size we actually use. Previously this grabbed
+    # 1920x1080 and scaled every frame down to 1280x720 -- discarding 55% of
+    # the pixels immediately after paying to decode them. Measured on this Pi:
+    # 111% of a core for 1080p+scale versus 39.8% for native 720p, at the same
+    # frame rate. That is ~70% of a core returned to the capture loop.
     return subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", "-f", "v4l2",
-         "-input_format", "mjpeg", "-video_size", "1920x1080",
+         "-input_format", "mjpeg",
+         "-video_size", "%dx%d" % (REC_W, REC_H),
          "-framerate", str(FPS), "-i", CAM_DEV,
-         "-vf", "scale=%d:%d" % (REC_W, REC_H),
          "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
         stdout=subprocess.PIPE, bufsize=REC_W * REC_H * 3)
 
