@@ -17,6 +17,21 @@
 const char* WIFI_SSID = "SkeweredNet";
 const char* WIFI_PASSWORD = "skewered1234";
 
+// Channel 11, not the default 1. ESP-NOW on an ESP8266 defaults to channel 1,
+// so a room with other Wemos boards running stock firmware puts all of them
+// directly on top of this AP. 1 and 11 do not overlap at all, so this
+// separates the scoring link from them without touching a single other board.
+//
+// It matters more here than for most traffic: telemetry goes to the subnet
+// broadcast address, and 802.11 broadcast frames get no acknowledgement and no
+// retransmission -- a collided packet is simply lost, silently, as a dropped
+// state update. Contention hurts this link before it hurts anything else.
+//
+// Safe for the Pi: its connection profile pins the BSSID (which does not
+// change with channel) and leaves channel/band unset, so it re-associates
+// wherever the AP moves.
+#define AP_CHANNEL 11
+
 // UDP target: the subnet broadcast address (x.x.x.255), computed at runtime
 // from our own IP so it works on any /24 network (SoftAP's 192.168.4.x, the
 // Pi hotspot's subnet, etc.). The ESP8266 lwIP stack does NOT reliably send
@@ -512,10 +527,12 @@ void setup() {
 
 #if USE_SOFTAP
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.softAP(WIFI_SSID, WIFI_PASSWORD, AP_CHANNEL);
   WiFi.macAddress(myData.macAddr);
   Serial.print("SoftAP started: ");
   Serial.print(WIFI_SSID);
+  Serial.print("  ch ");
+  Serial.print(AP_CHANNEL);
   Serial.print("  IP: ");
   Serial.println(WiFi.softAPIP());
 #else
