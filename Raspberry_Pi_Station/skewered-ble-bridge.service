@@ -1,0 +1,22 @@
+[Unit]
+Description=Skewered BLE bridge (box advertisements -> UDP 4210)
+Documentation=https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking
+# Needs the Bluetooth stack, not the network: it talks to BlueZ over the system
+# bus and sends to loopback, so there is nothing to wait for on the LAN.
+After=bluetooth.service dbus.service
+Wants=bluetooth.service
+# Never give up: this is the sole source of scoring data once the wired
+# transmitter is retired.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=ben
+Group=ben
+WorkingDirectory=/home/ben/skewered
+ExecStart=/usr/bin/python3 -u /home/ben/skewered/ble_bridge.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
