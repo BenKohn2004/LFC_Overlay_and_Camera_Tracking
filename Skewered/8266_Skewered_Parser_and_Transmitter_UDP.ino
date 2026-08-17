@@ -119,13 +119,126 @@ unsigned long lastReinit = 0;
 uint32_t serialReinits = 0;
 const unsigned long SERIAL_SILENT_REINIT_MS = 10000;
 
+// The pins behind the D-labels. D7 = GPIO13 carries the converter's TTL RX and
+// becomes UART0 RX after the swap. D6 = GPIO12 has been unused since the
+// SoftwareSerial version, but the reset below parks it high-Z anyway so that
+// nothing on this board can drive the converter's DI line.
+const uint8_t PIN_D7 = 13;
+const uint8_t PIN_D6 = 12;
+
 void initBoxSerial() {
   Serial.end();
   // pull-up BEFORE begin/swap: the RS-485 converter's output needs RX idled
   // high, and setting it after the swap re-muxes the pin off the UART
-  pinMode(13, INPUT_PULLUP);
+  pinMode(PIN_D7, INPUT_PULLUP);
   Serial.begin(115200);
   Serial.swap();   // UART0 RX -> GPIO13 = D7 (where the converter is wired)
+}
+
+// Deep link reset: what pulling the D7 wire off does, without the wire.
+//
+// initBoxSerial() on its own has had a long trial and does not clear the
+// cold-boot wedge -- 332 self-heal re-inits produced 3 recoveries (2026-08-02).
+// The reason is that it never lets GPIO13 go genuinely high-impedance: it tears
+// the UART down and hands the pin straight from one driven state (UART input
+// with pull-up) to another. Here the pin sits at INPUT with no pull-up for
+// PIN_FLOAT_MS first, which is as close to unplugged as software gets.
+//
+// It cannot go further from this end. The converter is powered from 5 V and
+// drives GPIO13 from the outside, so driving the pin low or high to "cycle" it
+// would be output-against-output contention through an input that is not 5 V
+// tolerant -- the exact stress the latch-up theory blames for the wedge.
+// Actually removing the external drive needs hardware: converter VCC on 3V3, a
+// divider on RXD, or a MOSFET gating the converter's ground.
+const unsigned long PIN_FLOAT_MS = 50;
+
+void resetBoxLink() {
+  Serial.end();
+  pinMode(PIN_D7, INPUT);   // high-Z -- nothing on this board holds the line
+  pinMode(PIN_D6, INPUT);
+  delay(PIN_FLOAT_MS);
+  initBoxSerial();          // pull-up back on, UART0 back on GPIO13
+  // Drop whatever the transition shook loose: a break condition, a half frame,
+  // or the spurious byte a re-init has always produced (the one that makes rx
+  // creep in lockstep with sr and has misread as line activity before).
+  //
+  // Time-bounded for the same reason Skewered_Parser's drain is: a floating or
+  // weakly-biased line chatters continuously, and an unbounded while() on it
+  // never returns. This one runs inside setup() too, where a hang would mean
+  // the AP never starts at all.
+  unsigned long drainStart = millis();
+  while (BoxSerial.available() && millis() - drainStart < 8) BoxSerial.read();
+}
+
+// Early-boot link resets. The failure only ever appears at cold boot with the
+// box already powered, so cycle the link a few times across the first seconds
+// instead of waiting out the 10 s silence self-heal. The times straddle the
+// 3.3 V rail settling and the AP coming up.
+//
+// Each one is skipped if valid frames are already arriving: a healthy boot is
+// never interrupted, and the reset still fires in every case that looks like
+// the fault.
+const unsigned long BOOT_RESET_AT_MS[] = {2000, 6000, 12000};
+const uint8_t BOOT_RESET_COUNT =
+    sizeof(BOOT_RESET_AT_MS) / sizeof(BOOT_RESET_AT_MS[0]);
+uint8_t bootResetIdx = 0;
+uint8_t bootResets = 0;   // how many actually fired (beacon: br=)
+
+// ---------------- Pin traffic probe (DIAGNOSTIC) ----------------
+// Answers one question the line probe cannot: WHICH pin is the box's data on?
+//
+// The converter modules label their TTL pins inconsistently -- "RXD"/"TXD" are
+// written from the module's point of view on some boards and the MCU's on
+// others -- so "RXD goes to D7" does not settle whether D7 carries data INTO
+// the ESP or a signal out of it. This counts transitions on both candidate
+// pins and reports each in the beacon, which settles it without a scope.
+//
+// Reading both pins from ONE register fetch keeps the comparison fair: neither
+// pin is sampled at a different moment than the other. The loop turns over
+// several million times a second against an 8.7 us bit time at 115200, so it
+// cannot miss a bit.
+//
+// Pull-ups stay ON while sampling, deliberately. A floating pin picks up noise
+// and would count edges that mean nothing; held up by the internal pull-up a
+// disconnected pin reads a steady high and counts ZERO, so a negative result
+// is real evidence rather than an absence of evidence. Anything actually
+// driving the line walks over a ~45k pull-up without noticing it.
+//
+// pinMode() on GPIO13 re-muxes the pin off UART0 (the same trap initBoxSerial
+// warns about), so this finishes by restoring the UART.
+const unsigned long EDGE_WINDOW_US = 20000;   // ~4 box frames at ~5 ms each
+const unsigned long EDGE_PERIOD_MS = 5000;
+
+// 0xFFFF = "no window has run yet". Without a sentinel, a probe that never
+// executes reports the same zeros as a probe that ran and saw a dead pin --
+// an absence of evidence wearing the costume of evidence.
+const uint16_t EDGES_UNSAMPLED = 0xFFFF;
+uint16_t g_edges_d6 = EDGES_UNSAMPLED;
+uint16_t g_edges_d7 = EDGES_UNSAMPLED;
+unsigned long lastEdgeSample = 0;
+
+void sampleEdges() {
+  pinMode(PIN_D6, INPUT_PULLUP);
+  pinMode(PIN_D7, INPUT_PULLUP);   // also re-muxes GPIO13 off UART0
+  delayMicroseconds(200);          // let the nodes settle
+
+  uint32_t g = GPI;
+  bool p6 = g & (1u << PIN_D6);
+  bool p7 = g & (1u << PIN_D7);
+  uint16_t e6 = 0, e7 = 0;
+
+  unsigned long t0 = micros();
+  while (micros() - t0 < EDGE_WINDOW_US) {
+    g = GPI;                       // both pins, one fetch, same instant
+    bool c6 = g & (1u << PIN_D6);
+    bool c7 = g & (1u << PIN_D7);
+    if (c6 != p6) { e6++; p6 = c6; }
+    if (c7 != p7) { e7++; p7 = c7; }
+  }
+
+  g_edges_d6 = e6;
+  g_edges_d7 = e7;
+  initBoxSerial();                 // pull-up + UART0 back on GPIO13
 }
 
 // ---------------- RS-485 line probe ----------------
@@ -174,11 +287,11 @@ unsigned long lastProbe = 0;
 
 void probeLine() {
   const int SAMPLES = 32;
-  pinMode(13, INPUT);          // drop the pull-up (also re-muxes off the UART)
+  pinMode(PIN_D7, INPUT);      // drop the pull-up (also re-muxes off the UART)
   delayMicroseconds(200);      // let the node settle
   int high = 0;
   for (int i = 0; i < SAMPLES; i++) {
-    if (digitalRead(13)) high++;
+    if (digitalRead(PIN_D7)) high++;
     delayMicroseconds(50);
   }
   initBoxSerial();             // restore pull-up + UART0 on GPIO13
@@ -475,10 +588,10 @@ void sendUdpUpdate() {
 // ---------------- Debug telemetry (port 4211) ----------------
 // One packet per second with internal health counters, so a wedge can be
 // diagnosed over the air (the COM5 serial adapter is untrustworthy).
-// Python unpack: struct.unpack("<B6IBBBB", data)  -> 29 bytes
+// Python unpack: struct.unpack("<B6IBBBBB", data)  -> 30 bytes
 //   magic 0xDD, uptime_ms, loop_count, rx_bytes, valid_packets,
 //   send_fails, free_heap, stations, rst_reason, serial_reinits (capped 255),
-//   line_probe
+//   line_probe, boot_resets
 // rst_reason (ESP8266 rst_info.reason): 0=power-on 1=HW watchdog
 //   2=exception/crash 3=SW watchdog 4=ESP.restart() (our dead-man)
 //   5=deep-sleep wake 6=external reset pin. Brownouts usually show as 0 or 6.
@@ -498,7 +611,15 @@ struct __attribute__((packed)) DebugMessage {
   uint8_t rst_reason;
   uint8_t serial_reinits;
   uint8_t line_probe;      // see "RS-485 line probe" below
+  uint8_t boot_resets;     // early-boot link resets that actually fired
+  uint16_t edges_d6;       // transitions counted on GPIO12 in the last window
+  uint16_t edges_d7;       // transitions counted on GPIO13 in the last window
 };
+
+// The logger parses by exact byte count, so a silent size change would drop
+// every beacon. Make it a compile error instead (same reasoning as the payload).
+static_assert(sizeof(DebugMessage) == 34,
+              "beacon size changed - add a format branch in debug_logger.py");
 
 void sendDebug() {
   DebugMessage d;
@@ -513,6 +634,9 @@ void sendDebug() {
   d.rst_reason = g_rst_reason;
   d.serial_reinits = serialReinits > 255 ? 255 : serialReinits;
   d.line_probe = g_line_probe;
+  d.boot_resets = bootResets;
+  d.edges_d6 = g_edges_d6;
+  d.edges_d7 = g_edges_d7;
   Udp.beginPacket(udpTarget(), DEBUG_PORT);
   Udp.write((uint8_t *)&d, sizeof(d));
   Udp.endPacket();
@@ -522,7 +646,9 @@ void sendDebug() {
 
 void setup() {
   g_rst_reason = ESP.getResetInfoPtr()->reason;   // why the last boot ended
-  initBoxSerial();   // UART on D7 with RX pull-up; also used by the self-heal
+  // Float D6/D7 briefly before the UART claims D7, then start it. More resets
+  // follow at BOOT_RESET_AT_MS if no frames arrive.
+  resetBoxLink();
   // (BoxSerial is a reference to Serial, so it is already started + swapped)
 
 #if USE_SOFTAP
@@ -584,6 +710,32 @@ void loop() {
 
   unsigned long dnow = millis();
 
+  // Early-boot link resets (see BOOT_RESET_AT_MS). Each slot is consumed
+  // whether or not it fires, so a link that comes up healthy and then dies is
+  // left to the 10 s self-heal rather than being cycled again out of schedule.
+  if (bootResetIdx < BOOT_RESET_COUNT && dnow >= BOOT_RESET_AT_MS[bootResetIdx]) {
+    if (validPackets == 0) {
+      resetBoxLink();
+      bootResets++;
+      lastRxByte = millis();   // don't let the reset itself age into a self-heal
+      dnow = millis();         // resetBoxLink blocked ~50 ms; a stale dnow here
+                               // makes dnow - lastRxByte underflow and fire the
+                               // self-heal on the very next test
+    }
+    bootResetIdx++;
+  }
+
+  // Pin traffic probe: only while nothing is being decoded. It steals the UART
+  // for 20 ms, so it must never run once real frames are arriving -- and once
+  // they are, the question it answers is already settled.
+  if (validPackets == 0 && dnow - lastEdgeSample >= EDGE_PERIOD_MS) {
+    sampleEdges();
+    lastRxByte = millis();   // the steal is not evidence of a silent line
+    dnow = millis();         // sampleEdges blocked 20 ms -- refresh before any
+                             // later `dnow - <timestamp>` test underflows
+    lastEdgeSample = dnow;
+  }
+
   // Probe the RS-485 line once valid frames have stopped. While the link is
   // delivering there is nothing to diagnose, and the probe would corrupt the
   // reception it interrupts.
@@ -603,11 +755,14 @@ void loop() {
   }
 
   // serial self-heal: the box streams constantly, so 10 s of silence means
-  // the UART is wedged (or the wire/converter is out) -- re-init and retry
-  // every 10 s until bytes flow again; harmless if the line is just unplugged
+  // the UART is wedged (or the wire/converter is out) -- reset and retry
+  // every 10 s until bytes flow again; harmless if the line is just unplugged.
+  // Uses the deep reset now: the plain re-init this used to call recovered 3
+  // times in 332 attempts, and the float gap costs 50 ms on an already-dead
+  // link.
   if (dnow - lastRxByte >= SERIAL_SILENT_REINIT_MS &&
       dnow - lastReinit >= SERIAL_SILENT_REINIT_MS) {
-    initBoxSerial();
+    resetBoxLink();
     lastReinit = dnow;
     serialReinits++;
   }

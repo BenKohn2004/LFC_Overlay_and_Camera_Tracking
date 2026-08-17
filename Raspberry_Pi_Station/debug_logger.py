@@ -1,7 +1,8 @@
 """Log Wemos debug telemetry (port 4211) to wemos_debug.log, 1 line/s.
-Flags reboots (uptime reset), loop stalls, and silence periods. Decodes the
-firmware reset reason when present (27-byte format) and stays compatible with
-the older 26-byte beacon.
+Flags reboots (uptime reset), loop stalls, silence periods, and early-boot link
+resets. Every beacon format from 26 to 30 bytes is accepted: the firmware has
+only ever appended fields, so the length alone identifies the version and an
+older transmitter keeps logging against a newer Pi.
 
 Also logs Wi-Fi association transitions. Without them a quiet stretch in the
 log is ambiguous: "no beacon because the transmitter is wedged" looks exactly
@@ -32,10 +33,14 @@ FMT_OLD = "<B6IB"      # 26 bytes: magic..stations
 FMT_NEW = "<B6IBB"     # 27 bytes: + rst_reason
 FMT_SH = "<B6IBBB"     # 28 bytes: + serial_reinits
 FMT_PR = "<B6IBBBB"    # 29 bytes: + line_probe
+FMT_BR = "<B6IBBBBB"   # 30 bytes: + boot_resets
+FMT_ED = "<B6IBBBBBHH"  # 34 bytes: + edges_d6, edges_d7 (pin traffic probe)
 LEN_OLD = struct.calcsize(FMT_OLD)
 LEN_NEW = struct.calcsize(FMT_NEW)
 LEN_SH = struct.calcsize(FMT_SH)
 LEN_PR = struct.calcsize(FMT_PR)
+LEN_BR = struct.calcsize(FMT_BR)
+LEN_ED = struct.calcsize(FMT_ED)
 
 # line_probe: what the RS-485 receive line does with the pull-up removed.
 # Distinguishes a switched-off scoring box from a broken link -- both of which
@@ -164,6 +169,7 @@ def main():
     prev_loops = None
     prev_reinits = None
     prev_probe = None
+    prev_boot = None
     silent_since = None
     # All interval maths uses the monotonic clock. The Pi has no working RTC
     # (it boots at 1970 and systemd-timesyncd restores an approximate time), so
@@ -204,7 +210,22 @@ def main():
         rst = None
         reinits = None
         probe = None
-        if len(data) == LEN_PR:
+        boot = None
+        edges = None
+        if len(data) == LEN_ED:
+            m = struct.unpack(FMT_ED, data)
+            rst = m[8]
+            reinits = m[9]
+            probe = m[10]
+            boot = m[11]
+            edges = (m[12], m[13])
+        elif len(data) == LEN_BR:
+            m = struct.unpack(FMT_BR, data)
+            rst = m[8]
+            reinits = m[9]
+            probe = m[10]
+            boot = m[11]
+        elif len(data) == LEN_PR:
             m = struct.unpack(FMT_PR, data)
             rst = m[8]
             reinits = m[9]
@@ -245,12 +266,20 @@ def main():
                 notes.append("LINE-%s" % PROBE[probe])
             elif probe == 2 and prev_probe in (1, 3):
                 notes.append("LINE-recovered")
+        # br only moves during the first seconds of a boot, so a change is the
+        # firmware reporting "the box was silent at startup and I cycled the
+        # link" -- the one line that says whether the boot-time fix even ran.
+        if boot is not None and prev_boot is not None and boot > prev_boot:
+            notes.append("BOOT-RESET-%d" % boot)
         prev_uptime, prev_loops, prev_reinits = up, loops, reinits
         prev_probe = probe
+        prev_boot = boot
         sr = ("" if reinits is None else " sr=%d" % reinits)
         pr = ("" if probe is None else " line=%s" % PROBE.get(probe, probe))
-        log.write("up=%dms loops=%d rx=%d valid=%d fails=%d heap=%d sta=%d%s%s %s"
-                  % (up, loops, rx, valid, fails, heap, stations, sr, pr,
+        br = ("" if boot is None else " br=%d" % boot)
+        ed = ("" if edges is None else " d6=%d d7=%d" % edges)
+        log.write("up=%dms loops=%d rx=%d valid=%d fails=%d heap=%d sta=%d%s%s%s%s %s"
+                  % (up, loops, rx, valid, fails, heap, stations, sr, pr, br, ed,
                      " ".join(notes)))
 
 
