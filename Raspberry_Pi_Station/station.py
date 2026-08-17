@@ -14,6 +14,7 @@ Exit: ESC anywhere, or press-and-hold 2 s on the LIVE screen.
 Flags: --force-record, --secs N.
 """
 import os
+import signal
 import socket
 import sqlite3
 import struct
@@ -44,6 +45,12 @@ SEGMENT_SECS = 300
 MIN_FREE_MB = 500
 FPS = 30
 CLIP_PRE, CLIP_POST = 4.0, 2.0
+
+# Pin the mic by CARD name, never by index. The webcam (Redeagle) also presents
+# an ALSA capture device, so hw:1,0-style indices reorder between boots and
+# would silently record the camera's mic -- or nothing at all.
+AUDIO_DEV = os.environ.get("SKEWERED_AUDIO_DEV", "hw:CARD=ME6S,DEV=0")
+AUDIO_RATE = 48000
 
 HOME = os.path.expanduser("~/skewered")
 ADIR = os.path.join(HOME, "assets")
@@ -259,10 +266,30 @@ def read_names():
         return ("LEFT", "RIGHT")
 
 
+def audio_ok(dev=AUDIO_DEV):
+    """True if the mic is present and actually captures.
+
+    Audio is OPTIONAL by design. If ffmpeg cannot open the ALSA device it
+    exits, and it would take the whole recorder with it -- losing the video
+    too. A mic that is unplugged, still enumerating, or renamed must degrade
+    to video-only, not to no recording at all: this box autostarts at boot in
+    a sports hall with nobody watching the console.
+    """
+    try:
+        r = subprocess.run(
+            ["arecord", "-D", dev, "-d", "1", "-f", "S16_LE",
+             "-r", str(AUDIO_RATE), "-c", "1", "-t", "raw"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=6)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 # ---------------- recorder ----------------
 class Recorder:
     def __init__(self, con):
         self.con = con
+        self.has_audio = False
         self.proc = None
         self.session_id = None
         self.session_start = None
@@ -295,9 +322,27 @@ class Recorder:
         self._new_bout(now, 0.0)
         self.con.commit()
         pattern = os.path.join(RECDIR, "rec_%Y-%m-%d_%H-%M-%S.mp4")
+        self.has_audio = audio_ok()
+        # thread_queue_size on BOTH inputs. Without it on the rawvideo pipe the
+        # ALSA reader is stalled by pipe backpressure, which is precisely the
+        # stall that would cause capture xruns -- the audio would inherit the
+        # video pipeline's jitter, which is the whole thing we are avoiding by
+        # letting ffmpeg open the mic itself instead of piping it through the
+        # capture loop.
         cmd = ["ffmpeg", "-loglevel", "error",
+               "-thread_queue_size", "512",
                "-f", "rawvideo", "-pix_fmt", "rgb24",
-               "-s", "%dx%d" % (REC_W, REC_H), "-r", str(FPS), "-i", "-",
+               "-s", "%dx%d" % (REC_W, REC_H), "-r", str(FPS), "-i", "-"]
+        if self.has_audio:
+            # -channels/-sample_rate, NOT -ac/-ar: those are codec options and
+            # the ALSA demuxer ignores them, falling back to its default of 2
+            # channels -- which this mono mic rejects outright, taking the
+            # whole recorder down with it.
+            cmd += ["-thread_queue_size", "1024",
+                    "-f", "alsa", "-channels", "1",
+                    "-sample_rate", str(AUDIO_RATE),
+                    "-i", AUDIO_DEV]
+        cmd += [
                # veryfast, not ultrafast. ultrafast was tried against the live
                # latency and halved the encoder's CPU (127% -> 55%) without
                # moving the loop rate at all (29.44 -> 29.47 fps), which is
@@ -305,7 +350,17 @@ class Recorder:
                # capture side was. It costs ~2x the file size, so there is no
                # reason to keep it.
                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-               "-pix_fmt", "yuv420p", "-g", str(FPS * 2),
+               "-pix_fmt", "yuv420p", "-g", str(FPS * 2)]
+        if self.has_audio:
+            # Do NOT add -shortest here. It is the obvious fix for the fact
+            # that the ALSA input never ends, and it DEADLOCKS: combined with
+            # the segment muxer, ffmpeg stopped draining the video pipe
+            # entirely -- capture loop blocked in anon_pipe_write, ffmpeg idle
+            # in futex_do_wait, 36-byte output file after 3 minutes, while
+            # ALSA sat there RUNNING and healthy with 224 s captured. Ending
+            # the process is handled by SIGINT in stop() instead.
+            cmd += ["-c:a", "aac", "-b:a", "128k"]
+        cmd += [
                "-force_key_frames", "expr:gte(t,n_forced*%d)" % SEGMENT_SECS,
                "-f", "segment", "-segment_time", str(SEGMENT_SECS),
                "-reset_timestamps", "1", "-strftime", "1",
@@ -332,6 +387,13 @@ class Recorder:
             return
         try:
             self.proc.stdin.close()
+            if self.has_audio:
+                # EOF on stdin ends the video input but NOT the ALSA one, which
+                # runs forever -- so ffmpeg would sit there until the timeout
+                # below and get killed on every single stop. SIGINT is ffmpeg's
+                # own clean-shutdown path (what Ctrl-C / 'q' does): it stops
+                # reading inputs and writes the trailer.
+                self.proc.send_signal(signal.SIGINT)
             self.proc.wait(timeout=15)
         except Exception:
             self.proc.kill()
