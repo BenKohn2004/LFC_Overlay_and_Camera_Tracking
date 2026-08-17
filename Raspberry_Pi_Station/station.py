@@ -120,14 +120,7 @@ def udp_thread():
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(("0.0.0.0", UDP_PORT))
     s.settimeout(1)
-    last_ka = 0.0
     while True:
-        if time.time() - last_ka > 10:
-            last_ka = time.time()
-            try:
-                s.sendto(b"ka", ("192.168.4.1", UDP_PORT))
-            except OSError:
-                pass
         try:
             data, _ = s.recvfrom(1024)
         except socket.timeout:
