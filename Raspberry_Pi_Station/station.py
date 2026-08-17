@@ -33,8 +33,22 @@ except ImportError:          # station still runs without the uploader
 # ---------------- config ----------------
 FMT = "<B6s4I12?32s"          # 67 bytes: transmitters without hit age
 FMT_AGE = "<B6s4I12?32sHH"    # 71 bytes: + left/right ms since the hit
+FMT_V3 = "<B6s4I12?32sHHBB?"  # 74 bytes: + raw light status per side, hide_extra
 LEN_PLAIN = struct.calcsize(FMT)
 LEN_AGE = struct.calcsize(FMT_AGE)
+LEN_V3 = struct.calcsize(FMT_V3)
+
+# Raw 3-bit light status from the box (byte 06 of its state packet).
+ST_OFF, ST_VALID, ST_NONVALID, ST_SHORT, ST_LATE = 0, 1, 2, 3, 4
+# Statuses whose timing value is a real, ticking "milliseconds since the hit".
+# For LATE the same field is a frozen lateness figure and for SHORT a duration,
+# so neither may be used to back-date anything.
+ST_AGE_MEANS_AGE = (ST_VALID, ST_NONVALID)
+
+# The box's own display reads one higher than the value on the wire -- measured
+# over four hits on both sides (271/272, 392/393, 378/379, 259/260). Match the
+# box, so a referee comparing the two screens never sees them disagree.
+LATE_DISPLAY_OFFSET = 1
 UDP_PORT = 4210
 REC_W, REC_H = 1280, 720
 DISP_W, DISP_H = 800, 450
@@ -84,7 +98,7 @@ PINNED_CLUBS = ["USA"]     # always offered in the picker (besides "None")
 
 # ---------------- shared telemetry state ----------------
 state = {"l": 0, "r": 0, "min": 0, "sec": 0, "flags": [False] * 12, "age": None,
-         "hit_age": None}
+         "hit_age": None, "status": (ST_OFF, ST_OFF), "hide_extra": False}
 _lock = threading.Lock()
 last_activity = [0.0]
 pending_events = []
@@ -113,6 +127,49 @@ def settle_pending_touch(l, r):
     pending_touch[0] = None
 
 
+def hit_time(now, status, hit_age):
+    """Back-date a touch to when the hit physically happened.
+
+    The first packet carrying a hit already reports it as 7-93 ms old (measured
+    over five episodes), and transport jitter adds more on top, so arrival time
+    is a poor timestamp for something judged in milliseconds. The box's own age
+    field removes that error rather than averaging it.
+
+    Only VALID and NONVALID carry a real age. For LATE the same bytes hold a
+    frozen lateness figure and for SHORT a duration -- back-dating by either
+    would move the touch to a time it did not happen.
+
+    With two ages present the larger one is the earlier hit, and therefore the
+    true start of the episode.
+    """
+    if not hit_age:
+        return now
+    ages = [hit_age[i] for i in (0, 1)
+            if status[i] in ST_AGE_MEANS_AGE and hit_age[i]]
+    return now - max(ages) / 1000.0 if ages else now
+
+
+def note_special(episode, status, hit_age):
+    """Fold lateness and the double-touch margin into the running episode."""
+    for i, side in ((0, "left"), (1, "right")):
+        if status[i] == ST_LATE and hit_age:
+            # Frozen for the whole episode, so max() is just belt and braces.
+            episode["late"][i] = max(episode["late"][i], hit_age[i])
+            episode["lights"].add("late_" + side)
+        elif status[i] == ST_SHORT:
+            episode["lights"].add("short_" + side)
+
+    # Both sides valid: the two ages tick together, so their difference is the
+    # interval between the hits and the LARGER age landed first. Taken once, at
+    # the first sighting -- once either age clamps at 999 the difference starts
+    # shrinking and would understate the margin.
+    if (hit_age and not episode["margin_set"] and all(hit_age)
+            and all(s in ST_AGE_MEANS_AGE for s in status)):
+        episode["margin"] = abs(hit_age[0] - hit_age[1])
+        episode["first"] = "left" if hit_age[0] > hit_age[1] else "right"
+        episode["margin_set"] = True
+
+
 def udp_thread():
     prev = None
     episode = None
@@ -129,12 +186,24 @@ def udp_thread():
         # upgraded in either order -- a length mismatch here drops EVERY packet
         # and the station just shows "NO BOX SIGNAL", which is a miserable way
         # to discover a version skew.
-        if len(data) == LEN_AGE:
+        if len(data) == LEN_V3:
+            f = struct.unpack(FMT_V3, data)
+            hit_age = (f[19], f[20])
+            status = (f[21], f[22])   # left, right -- raw 3-bit box status
+            hide_extra = f[23]
+        elif len(data) == LEN_AGE:
             f = struct.unpack(FMT_AGE, data)
             hit_age = (f[19], f[20])
+            # Source predates the raw status: infer what the booleans can show.
+            # Late and short simply are not expressible here.
+            status = (ST_VALID if f[7] else ST_NONVALID if f[9] else ST_OFF,
+                      ST_VALID if f[6] else ST_NONVALID if f[8] else ST_OFF)
+            hide_extra = False
         elif len(data) == LEN_PLAIN:
             f = struct.unpack(FMT, data)
             hit_age = None            # transmitter predates the hit-age field
+            status = (ST_OFF, ST_OFF)
+            hide_extra = False
         else:
             continue
         now = time.time()
@@ -146,12 +215,14 @@ def udp_thread():
             state["flags"] = flags
             state["age"] = now
             state["hit_age"] = hit_age   # (left_ms, right_ms) or None
+            state["status"] = status     # raw 3-bit light status per side
+            state["hide_extra"] = hide_extra
 
             if prev is None:
-                prev = (l, r, mn, sec, flags)
+                prev = (l, r, mn, sec, flags, status)
                 continue
-            pl, pr, pm, ps, pf = prev
-            if (l, r, mn, sec, flags) == (pl, pr, pm, ps, pf):
+            pl, pr, pm, ps, pf, pst = prev
+            if (l, r, mn, sec, flags, status) == (pl, pr, pm, ps, pf, pst):
                 continue
             last_activity[0] = now
             state_changes.append((now, l, r, mn, sec,
@@ -166,18 +237,26 @@ def udp_thread():
                                        "l0": pl, "r0": pr, "l1": 0, "r1": 0,
                                        "detail": ""})
 
-            hit_now = any(flags[0:4])
-            hit_prev = any(pf[0:4])
+            # Late and short hits set no boolean flag, so the raw status has to
+            # be consulted here or those touches never open an episode at all
+            # -- which is what used to happen: a late hit was invisible.
+            special = (ST_SHORT, ST_LATE)
+            hit_now = any(flags[0:4]) or any(s in special for s in status)
+            hit_prev = any(pf[0:4]) or any(s in special for s in pst)
             if hit_now and not hit_prev and episode is None:
                 # Trigger 1: new lights. The score just before them is the
                 # settled result of the previous touch -- which also makes each
                 # touch's after-score equal the next one's before-score.
                 settle_pending_touch(pl, pr)
-                episode = {"ts": now, "lights": set(), "l0": pl, "r0": pr}
+                episode = {"ts": hit_time(now, status, hit_age),
+                           "lights": set(), "l0": pl, "r0": pr,
+                           "late": [0, 0], "margin": 0, "first": "",
+                           "margin_set": False}
             if episode is not None:
                 for i in range(4):
                     if flags[i]:
                         episode["lights"].add(FLAG_NAMES[i])
+                note_special(episode, status, hit_age)
                 if not hit_now:
                     # Write the touch now so a crash cannot lose it, but treat
                     # this score as provisional -- it is corrected by one of
@@ -186,7 +265,11 @@ def udp_thread():
                         "type": "touch", "ts": episode["ts"],
                         "l0": episode["l0"], "r0": episode["r0"],
                         "l1": l, "r1": r,
-                        "detail": "+".join(sorted(episode["lights"]))})
+                        "detail": "+".join(sorted(episode["lights"])),
+                        "late_l": episode["late"][0],
+                        "late_r": episode["late"][1],
+                        "margin_ms": episode["margin"],
+                        "first_side": episode["first"]})
                     pending_touch[0] = episode["ts"]
                     episode = None
 
@@ -196,7 +279,7 @@ def udp_thread():
                         "type": "card" if i < 10 else "priority", "ts": now,
                         "l0": pl, "r0": pr, "l1": l, "r1": r,
                         "detail": FLAG_NAMES[i]})
-            prev = (l, r, mn, sec, flags)
+            prev = (l, r, mn, sec, flags, status)
 
 
 # ---------------- database ----------------
@@ -221,6 +304,17 @@ def db_init():
     for col in ("l_name", "r_name", "youtube_id", "upload_path"):
         try:
             con.execute("ALTER TABLE bouts ADD COLUMN %s TEXT DEFAULT ''" % col)
+        except sqlite3.OperationalError:
+            pass
+    # Hit timing, added once the box's own millisecond fields were understood.
+    # late_l/late_r are the box's lateness figure for a hit that arrived after
+    # lockout; margin_ms is the gap between the two hits of a double touch and
+    # first_side says which of them landed first.
+    for col, decl in (("late_l", "INT DEFAULT 0"), ("late_r", "INT DEFAULT 0"),
+                      ("margin_ms", "INT DEFAULT 0"),
+                      ("first_side", "TEXT DEFAULT ''")):
+        try:
+            con.execute("ALTER TABLE events ADD COLUMN %s %s" % (col, decl))
         except sqlite3.OperationalError:
             pass
     con.execute("CREATE TABLE IF NOT EXISTS names_used("
@@ -425,10 +519,15 @@ class Recorder:
         self.con.execute(
             "INSERT INTO events(session_id, bout_id, type, ts, session_offset,"
             " file_idx, file_offset, l_before, r_before, l_after, r_after,"
-            " detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " detail, late_l, late_r, margin_ms, first_side)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (self.session_id, self.bout_id, ev["type"], ev["ts"], off,
              int(off // SEGMENT_SECS), off % SEGMENT_SECS,
-             ev["l0"], ev["r0"], ev["l1"], ev["r1"], ev["detail"]))
+             ev["l0"], ev["r0"], ev["l1"], ev["r1"], ev["detail"],
+             # Only touch events carry these; cards, priorities and bout starts
+             # leave them at zero.
+             ev.get("late_l", 0), ev.get("late_r", 0),
+             ev.get("margin_ms", 0), ev.get("first_side", "")))
         self.con.commit()
 
     def session_files(self):
@@ -805,6 +904,31 @@ def make_overlay_assets():
         "prio_l":   (load("Red Rectangle.png", 240, 120, 0.550, 0.550), cv(183, 809)),
         "prio_r":   (load("Green Rectangle.png", 240, 120, 0.550, 0.550), cv(1605, 809)),
     }
+
+
+LATE_OUTLINE = (168, 80, 255)    # purple, distinct from every lamp colour
+LATE_FILL = (0, 0, 0)
+LATE_TEXT = (255, 255, 255)
+
+
+def draw_late_box(surf, item, font, ms):
+    """Draw the lateness box directly over one side's lamp.
+
+    A late hit belongs to that side and reads best exactly where the eye
+    already looks for its light, so this occupies the lamp's rectangle rather
+    than sitting near it. The number is the box's own figure, so the overlay
+    and the scoring box never disagree.
+
+    Sized from the image's OPAQUE area, not its surface: the lamp PNGs carry
+    transparent padding, so get_size() is bigger than the rectangle anyone
+    actually sees and would leave the black box overhanging the light.
+    """
+    img, pos = item
+    rect = img.get_bounding_rect().move(pos[0], pos[1])
+    pygame.draw.rect(surf, LATE_FILL, rect)
+    pygame.draw.rect(surf, LATE_OUTLINE, rect, max(6, rect.height // 7))
+    t = font.render(str(int(ms)), True, LATE_TEXT)
+    surf.blit(t, t.get_rect(center=rect.center))
 
 
 def center_in(surf, text_surf, item):
@@ -1525,6 +1649,16 @@ def main():
         if fl[0]: surf.blit(*IM["green"])
         if fl[3]: surf.blit(*IM["white_r"])
         if fl[2]: surf.blit(*IM["white_g"])
+        # A late hit lights nothing above -- its status is neither valid nor
+        # non-valid -- so this box occupies an otherwise empty slot rather than
+        # competing with a lamp. Suppressed when the box itself is configured
+        # to hide extra hit timing; the protocol defines that flag so repeater
+        # displays follow the box's setting, and this overlay is one.
+        if not st["hide_extra"]:
+            for i, key in ((0, "red"), (1, "green")):
+                if st["status"][i] == ST_LATE and st["hit_age"]:
+                    draw_late_box(surf, IM[key], font_name,
+                                  st["hit_age"][i] + LATE_DISPLAY_OFFSET)
         if fl[7]: surf.blit(*IM["ycard_r"])
         if fl[6]: surf.blit(*IM["ycard_g"])
         if fl[9]: surf.blit(*IM["rcard_r"])

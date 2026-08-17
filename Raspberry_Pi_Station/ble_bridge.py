@@ -52,10 +52,19 @@ HEARTBEAT_MS = 100         # match the transmitter's 10 Hz floor
 STALE_S = 5.0              # stop emitting after this long with no advertisement
 CLEANUP_S = 60.0           # drop rotated-address device objects this old
 
-# Same layout as the transmitter's FaveroMessage (71 bytes).
-FMT_AGE = "<B6s4I12?32sHH"
-PACKET_LEN = struct.calcsize(FMT_AGE)
-assert PACKET_LEN == 71, PACKET_LEN
+# The transmitter's FaveroMessage (71 bytes) plus the raw 3-bit light status
+# per side and the box's hide_extra_hits flag -> 74 bytes.
+#
+# The booleans in the original payload can only express valid and non-valid.
+# Short/whipover (3) and late (4) have no boolean, so they used to arrive as
+# "no light at all" -- a late hit was invisible to the station. Sending the raw
+# status keeps every present and future value intact (5-7 are reserved) instead
+# of inventing a flag per light type.
+FMT_AGE = "<B6s4I12?32sHH"       # 71: what the ESP8266 transmitter sent
+FMT_V3 = "<B6s4I12?32sHHBB?"     # 74: + left_status, right_status, hide_extra
+PACKET_LEN = struct.calcsize(FMT_V3)
+assert struct.calcsize(FMT_AGE) == 71, struct.calcsize(FMT_AGE)
+assert PACKET_LEN == 74, PACKET_LEN
 
 # The advertised state packet is the serial frame minus its 0xEE prefix, so
 # every index here is the transmitter firmware's index minus one.
@@ -100,6 +109,15 @@ def decode(p):
     right_card = (p[12] >> 4) & 0x03
 
     return {
+        # Raw 3-bit status per side: 0 off, 1 valid, 2 non-valid,
+        # 3 short/whipover, 4 late, 5-7 reserved. Passed through untouched so
+        # the station can act on values this bridge has never seen.
+        "left_status": left_status,
+        "right_status": right_status,
+        # Set when the box is configured NOT to show extra hit timing. The
+        # protocol defines it so repeater displays can honour that setting,
+        # which is exactly what the overlay is.
+        "hide_extra": bool(p[6] & 0x40),
         "left_score": left_score,
         "right_score": right_score,
         "seconds": seconds,
@@ -120,10 +138,15 @@ def decode(p):
 
 
 def build_packet(s, box_name=DEFAULT_BOX_NAME):
-    """Field dict -> the transmitter's exact 71-byte wire format."""
+    """Field dict -> the 74-byte wire format (the transmitter's 71 + statuses).
+
+    The first 71 bytes are byte-identical to what the ESP8266 sent, so a
+    receiver that only knows the old layout still reads scores, clock, lights
+    and hit age correctly from the prefix.
+    """
     name = box_name.encode()[:32].ljust(32, b"\x00")
     return struct.pack(
-        FMT_AGE,
+        FMT_V3,
         0,                      # msgType: the firmware leaves this zeroed too
         b"\x00" * 6,            # mac: unused by station.py; no Wi-Fi source here
         s["right_score"], s["left_score"], s["seconds"], s["minutes"],
@@ -134,6 +157,7 @@ def build_packet(s, box_name=DEFAULT_BOX_NAME):
         s["priority_left"], s["priority_right"],
         name,
         s["age_l"], s["age_r"],
+        s["left_status"], s["right_status"], s["hide_extra"],
     )
 
 
