@@ -50,9 +50,17 @@ echo "== set a password for the share =="
 # Windows 10 refuses guest SMB connections by default, so a passwordless share
 # fails with a misleading error. This password is local to Samba -- it is not
 # the Pi login and has nothing to do with any online account.
-echo "This is the password Windows will ask for (user: $USER_NAME)."
-sudo smbpasswd -a "$USER_NAME"
-sudo smbpasswd -e "$USER_NAME"
+if [ -t 0 ]; then
+    echo "This is the password Windows will ask for (user: $USER_NAME)."
+    sudo smbpasswd -a "$USER_NAME"
+    sudo smbpasswd -e "$USER_NAME"
+else
+    # No terminal -- e.g. run over ssh without -t. smbpasswd cannot prompt, and
+    # a password must never be passed on a command line, where it would land in
+    # shell history. Everything else is finished; the operator sets this.
+    echo "NOT SET -- no terminal to prompt on. Finish with:"
+    echo "    sudo smbpasswd -a $USER_NAME && sudo smbpasswd -e $USER_NAME"
+fi
 
 sudo systemctl restart smbd
 sudo systemctl enable smbd

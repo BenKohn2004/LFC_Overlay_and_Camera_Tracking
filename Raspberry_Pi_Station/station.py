@@ -291,6 +291,15 @@ def udp_thread():
 # ---------------- database ----------------
 def db_init():
     con = sqlite3.connect(DBPATH)
+    # WAL, because the export worker writes from its own connection while the
+    # main loop is reading bouts for the browser. The default rollback journal
+    # lets a reader block a writer, which is exactly how "database is locked"
+    # killed an export mid-cut. WAL allows one writer alongside readers, and it
+    # is a property of the file, so every connection inherits it.
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.OperationalError:
+        pass                            # not fatal; the default still works
     con.executescript("""
     CREATE TABLE IF NOT EXISTS sessions(
         id INTEGER PRIMARY KEY, start_ts REAL, end_ts REAL);
@@ -1219,7 +1228,7 @@ def main():
                           ids=list(bout_ids), error="")
 
         def worker():
-            c2 = sqlite3.connect(DBPATH, timeout=10)
+            c2 = sqlite3.connect(DBPATH, timeout=30)
             try:
                 if combine:
                     path, title, desc, used, errs = build_combined(
