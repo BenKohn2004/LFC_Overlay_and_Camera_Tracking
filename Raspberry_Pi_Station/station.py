@@ -14,6 +14,7 @@ Exit: ESC anywhere, or press-and-hold 2 s on the LIVE screen.
 Flags: --force-record, --secs N.
 """
 import os
+import shutil
 import signal
 import socket
 import sqlite3
@@ -25,10 +26,10 @@ import time
 
 import pygame
 
-try:
-    import yt_upload
-except ImportError:          # station still runs without the uploader
-    yt_upload = None
+# Videos leave this box as files on a Samba share, not by uploading themselves.
+# Nothing here holds a cloud credential: the Pi travels to clubs, and a stored
+# refresh token would travel with it. Uploading is a deliberate human act, done
+# from a machine that is already logged in.
 
 # ---------------- config ----------------
 FMT = "<B6s4I12?32s"          # 67 bytes: transmitters without hit age
@@ -85,8 +86,13 @@ MODE_WIFI = "wifi"
 MODE_WIFIPW = "wifipw"
 MODE_CONFIRM = "confirm"    # generic yes/no gate in front of a destructive action
 LOGODIR = os.path.join(os.path.expanduser("~/skewered"), "logos")
+# Scratch space for the per-bout cuts. Intermediates only -- a combined export
+# concatenates them and then deletes them.
 UPLOAD_DIR = os.path.join(os.path.expanduser("~/skewered"), "uploads")
-TOKEN_PATH = os.path.join(os.path.expanduser("~/skewered"), "yt_token.json")
+# What the Samba share points at. Finished, human-named files land here and
+# stay until someone clears them: the Pi cannot know when they were copied off,
+# so nothing deletes them automatically (see the CLEAR EXPORTS button).
+EXPORT_DIR = os.path.join(os.path.expanduser("~/skewered"), "exports")
 UPLOAD_PRE = 4.0            # lead-in before a bout's first touch
 UPLOAD_POST = 4.0           # tail after its last touch
 UPLOAD_MAX_SECS = 1200      # 20-minute cap per uploaded bout
@@ -301,7 +307,11 @@ def db_init():
     CREATE TABLE IF NOT EXISTS state_log(
         ts REAL, session_id INT, l INT, r INT, min INT, sec INT, flags TEXT);
     """)
-    for col in ("l_name", "r_name", "youtube_id", "upload_path"):
+    # export_name is the "already saved" marker that youtube_id used to be: the
+    # filename this bout was written to on the share. youtube_id is kept, not
+    # dropped -- it is the record of what was uploaded back when the station
+    # uploaded things, and SQLite makes dropping columns awkward anyway.
+    for col in ("l_name", "r_name", "youtube_id", "upload_path", "export_name"):
         try:
             con.execute("ALTER TABLE bouts ADD COLUMN %s TEXT DEFAULT ''" % col)
         except sqlite3.OperationalError:
@@ -645,6 +655,136 @@ STEP_REPEAT_EVERY = 4     # loop iterations between repeats
 YT_DESC_MAX = 5000        # YouTube's hard description limit
 YT_DESC_MARGIN = 250      # stay clear of it
 YT_MIN_CHAPTER = 10.0     # a chapter shorter than this voids the WHOLE list
+
+
+_FS_BAD = set('/\\:*?"<>|')
+
+
+def safe_filename(name):
+    """Make a title usable as a filename on the share.
+
+    The share is read from Windows, so the reserved characters are Windows'
+    rather than Linux's -- a colon in `Name vs Name - date (5 - 3)` copies
+    across as a broken file otherwise.
+    """
+    out = "".join("-" if c in _FS_BAD else c for c in name)
+    out = " ".join(out.split())          # collapse whitespace, strip ends
+    return out[:120] or "bout"
+
+
+def publish(src, title, description=None):
+    """Move a finished cut onto the share under a human-readable name.
+
+    The filename IS the interface here -- nobody browsing a folder in Explorer
+    can tell what `bout_0007.mp4` contains. Returns the bare filename, which is
+    what gets recorded as the bout's export marker.
+
+    The touch list is written beside it as a .txt. It used to become the
+    YouTube description; with the upload done by hand it is still the useful
+    part, ready to paste in.
+    """
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    base = safe_filename(title)
+    name = base + ".mp4"
+    dst = os.path.join(EXPORT_DIR, name)
+    n = 2
+    while os.path.exists(dst):           # never clobber an earlier export
+        name = "%s (%d).mp4" % (base, n)
+        dst = os.path.join(EXPORT_DIR, name)
+        n += 1
+    try:
+        os.replace(src, dst)             # same filesystem: atomic rename
+    except OSError:
+        try:
+            shutil.copy2(src, dst)       # different device -- copy and drop
+            os.remove(src)
+        except OSError:
+            return None
+    if description:
+        try:
+            with open(os.path.splitext(dst)[0] + ".txt", "w") as fh:
+                fh.write(description)
+        except OSError:
+            pass                         # the video is what matters
+    return name
+
+
+def exports_on_share():
+    """(file count, total bytes) currently sitting on the share."""
+    n = b = 0
+    try:
+        for f in os.listdir(EXPORT_DIR):
+            if f.endswith(".mp4"):
+                n += 1
+                b += os.path.getsize(os.path.join(EXPORT_DIR, f))
+    except OSError:
+        pass
+    return n, b
+
+
+def clear_exports():
+    """Delete everything on the share and forget the export markers.
+
+    Clearing the markers as well is deliberate: once a file is gone, the bout
+    is genuinely unsaved again, and SAVE ALL should offer it. A marker pointing
+    at a file that no longer exists would quietly hide it forever.
+    """
+    n = 0
+    try:
+        for f in os.listdir(EXPORT_DIR):
+            if not f.endswith((".mp4", ".txt")):
+                continue
+            try:
+                os.remove(os.path.join(EXPORT_DIR, f))
+                if f.endswith(".mp4"):
+                    n += 1               # count videos, not their sidecars
+            except OSError:
+                pass
+    except OSError:
+        pass
+    con = sqlite3.connect(DBPATH, timeout=10)
+    con.execute("UPDATE bouts SET export_name=''")
+    con.commit()
+    con.close()
+    return n
+
+
+def share_address():
+    """The UNC path to type into Windows Explorer, or None if not on a network.
+
+    Shown on screen because this is the one fact needed to fetch the videos and
+    the one nobody can guess -- and mDNS (`raspberrypi.local`) has not been
+    reliable here, so the literal address is what gets displayed.
+    """
+    ip = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # No packet is sent; this just asks the routing table which local
+            # address would be used, which works with no internet present.
+            s.connect(("192.168.1.1", 9))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        pass
+    if not ip or ip.startswith("127."):
+        # No route to a gateway -- which is the normal case on a direct cable
+        # or a link-local link, where there is still a perfectly usable address
+        # to type into Explorer. Ask for the interface addresses directly.
+        ip = None
+        try:
+            out = subprocess.run(["hostname", "-I"], capture_output=True,
+                                 text=True, timeout=2).stdout
+            for cand in out.split():
+                if ":" not in cand and not cand.startswith("127."):
+                    ip = cand
+                    break
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if not ip:
+        return None
+    return r"\\%s\exports" % ip
 
 
 def clip_duration(path):
@@ -1064,28 +1204,65 @@ def main():
     wifi_scan_busy = [False]
     export_job = {"active": False, "done": 0, "total": 0, "ok": 0,
                   "fail": 0, "finished": False}
-    upload_job = {"active": False, "done": 0, "total": 0, "ok": 0, "fail": 0,
-                  "finished": False, "current": "", "pct": 0, "error": ""}
 
     def start_exports(bout_ids, combine=False):
+        """Cut the bouts and put the result on the share.
+
+        Two shapes: one file per bout, or every bout concatenated into a single
+        file. Both end with `publish()` and an export_name written to each bout,
+        which is what stops the same bout being exported twice.
+        """
         if export_job["active"] or not bout_ids:
             return
         export_job.update(active=True, done=0, total=len(bout_ids), ok=0,
                           fail=0, finished=False, combine=combine,
-                          ids=list(bout_ids))
+                          ids=list(bout_ids), error="")
 
         def worker():
             c2 = sqlite3.connect(DBPATH, timeout=10)
-            for bid in bout_ids:
-                path, err = export_bout(c2, rec, bid)
-                export_job["done"] += 1
-                if path:
-                    export_job["ok"] += 1
+            try:
+                if combine:
+                    path, title, desc, used, errs = build_combined(
+                        c2, rec, bout_ids)
+                    export_job["done"] = len(bout_ids)
+                    export_job["fail"] = len(errs)
+                    if not path:
+                        export_job["error"] = "combine failed"
+                    else:
+                        name = publish(path, title, desc)
+                        if name:
+                            for bid in used:
+                                c2.execute("UPDATE bouts SET export_name=?"
+                                           " WHERE id=?", (name, bid))
+                            c2.commit()
+                            export_job["ok"] = 1
+                        else:
+                            export_job["error"] = "could not write to share"
+                    # The per-bout cuts were only ever inputs to the concat.
+                    for bid in bout_ids:
+                        p = os.path.join(UPLOAD_DIR, "bout_%04d.mp4" % bid)
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
                 else:
-                    export_job["fail"] += 1
-            c2.close()
-            export_job["active"] = False
-            export_job["finished"] = True
+                    for bid in bout_ids:
+                        path, _err = export_bout(c2, rec, bid)
+                        name = publish(path, bout_upload_title(c2, bid),
+                                       bout_description(c2, bid)) \
+                            if path else None
+                        export_job["done"] += 1
+                        if name:
+                            c2.execute("UPDATE bouts SET export_name=?"
+                                       " WHERE id=?", (name, bid))
+                            c2.commit()
+                            export_job["ok"] += 1
+                        else:
+                            export_job["fail"] += 1
+            finally:
+                c2.close()
+                export_job["active"] = False
+                export_job["finished"] = True
         threading.Thread(target=worker, daemon=True).start()
 
     def start_wifi_scan():
@@ -1097,126 +1274,9 @@ def main():
             wifi_scan_busy[0] = False
         threading.Thread(target=worker, daemon=True).start()
 
-    def pending_upload_bouts():
-        return [(r[0], r[1]) for r in con.execute(
-            "SELECT id, upload_path FROM bouts WHERE youtube_id='' AND"
-            " upload_path<>'' ORDER BY id")]
-
-    def start_uploads():
-        if upload_job["active"] or yt_upload is None:
-            return False
-        items = pending_upload_bouts()
-        items = [(b, p) for (b, p) in items if os.path.exists(p)]
-        if not items:
-            return False
-        upload_job.update(active=True, done=0, total=len(items), ok=0,
-                          fail=0, finished=False, current="", pct=0, error="")
-
-        def worker():
-            c2 = sqlite3.connect(DBPATH, timeout=10)
-            for bid, path in items:
-                title = bout_upload_title(c2, bid)
-                upload_job["current"] = title
-                upload_job["pct"] = 0
-
-                def prog(sent, total, _j=upload_job):
-                    _j["pct"] = int(sent * 100 / max(1, total))
-
-                try:
-                    vid = yt_upload.upload(
-                        path, title, description=bout_description(c2, bid),
-                        token_path=TOKEN_PATH, progress=prog)
-                    c2.execute("UPDATE bouts SET youtube_id=? WHERE id=?",
-                               (vid or "uploaded", bid))
-                    c2.commit()
-                    upload_job["ok"] += 1
-                    try:
-                        os.remove(path)     # cut file no longer needed
-                    except OSError:
-                        pass
-                except Exception as e:
-                    upload_job["error"] = str(e)[:70]
-                    upload_job["fail"] += 1
-                    upload_job["done"] += 1
-                    if "quota" in str(e).lower():
-                        break               # stop; resume another day
-                    continue
-                upload_job["done"] += 1
-            c2.close()
-            upload_job["active"] = False
-            upload_job["finished"] = True
-        threading.Thread(target=worker, daemon=True).start()
-        return True
-
-    def start_combined_upload(ids):
-        """Concatenate the cut bouts into one video and upload that.
-
-        One video instead of N is the whole point: YouTube's daily limit
-        counts videos, not minutes, so a backlog that would blow the quota
-        fits in a single upload.
-        """
-        if upload_job["active"] or yt_upload is None or not ids:
-            return False
-        upload_job.update(active=True, done=0, total=1, ok=0, fail=0,
-                          finished=False, current="Combining...", pct=0,
-                          error="")
-
-        def worker():
-            c2 = sqlite3.connect(DBPATH, timeout=10)
-            path, used = None, []
-            try:
-                path, title, desc, used, errs = build_combined(c2, rec, ids)
-                if not path:
-                    upload_job["error"] = "combine failed"
-                    upload_job["fail"] = 1
-                else:
-                    upload_job["current"] = title
-
-                    def prog(sent, total, _j=upload_job):
-                        _j["pct"] = int(sent * 100 / max(1, total))
-
-                    vid = yt_upload.upload(path, title, description=desc,
-                                           token_path=TOKEN_PATH, progress=prog)
-                    for bid in used:
-                        c2.execute("UPDATE bouts SET youtube_id=? WHERE id=?",
-                                   (vid or "uploaded", bid))
-                    c2.commit()
-                    upload_job["ok"] = 1
-            except Exception as e:
-                upload_job["error"] = str(e)[:70]
-                upload_job["fail"] = 1
-            finally:
-                # Both the per-bout cuts and the combined file are disposable:
-                # nothing resumes a part-finished upload, so a retry re-cuts
-                # anyway, and these are large enough to fill the card.
-                for bid in used:
-                    p = os.path.join(UPLOAD_DIR, "bout_%04d.mp4" % bid)
-                    if os.path.exists(p):
-                        try:
-                            os.remove(p)
-                        except OSError:
-                            pass
-                if path and os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
-                c2.close()
-                upload_job["done"] = 1
-                upload_job["active"] = False
-                upload_job["finished"] = True
-        threading.Thread(target=worker, daemon=True).start()
-        return True
-
-    def begin_upload_phase():
-        """Route to one-combined-video or the per-bout uploader."""
-        if export_job.get("combine"):
-            return start_combined_upload(export_job.get("ids") or [])
-        return start_uploads()
-
     def uploadable_bouts():
         return [r[0] for r in con.execute(
-            "SELECT b.id FROM bouts b WHERE b.youtube_id='' AND EXISTS"
+            "SELECT b.id FROM bouts b WHERE b.export_name='' AND EXISTS"
             " (SELECT 1 FROM events e WHERE e.bout_id=b.id AND"
             "  e.type='touch') ORDER BY b.id")]
 
@@ -1411,7 +1471,7 @@ def main():
         """(bouts, touches, not_yet_uploaded, video_bytes) for the confirm text."""
         nb = con.execute("SELECT COUNT(*) FROM bouts").fetchone()[0]
         nt = con.execute("SELECT COUNT(*) FROM events WHERE type='touch'").fetchone()[0]
-        nu = con.execute("SELECT COUNT(*) FROM bouts b WHERE b.youtube_id='' AND"
+        nu = con.execute("SELECT COUNT(*) FROM bouts b WHERE b.export_name='' AND"
                          " EXISTS (SELECT 1 FROM events e WHERE e.bout_id=b.id"
                          " AND e.type='touch')").fetchone()[0]
         vb = 0
@@ -1431,7 +1491,7 @@ def main():
         are shared between bouts in a session. That reasoning does not apply
         here: if every bout goes, no segment is referenced by anything, so the
         footage can be reclaimed. Kept either way: fencer names, club logos and
-        the YouTube token -- this clears recordings, not configuration.
+        the share settings -- this clears recordings, not configuration.
         """
         con.execute("DELETE FROM events")
         con.execute("DELETE FROM bouts")
@@ -1465,17 +1525,16 @@ def main():
                      WHERE b2.session_id=b.session_id),
                    (SELECT COUNT(*) FROM bouts b3
                      WHERE b3.session_id=b.session_id),
-                   b.youtube_id
+                   b.export_name
             FROM bouts b ORDER BY b.id DESC""").fetchall()
         out = []
-        for (bid, sid, ts, ln, rn, n, lf, rf, first_id, nbouts, ytid) in rows:
+        for (bid, sid, ts, ln, rn, n, lf, rf, first_id, nbouts, exported) in rows:
             when = time.strftime("%b %d %H:%M", time.localtime(ts))
             names = "%s vs %s" % (ln or "LEFT", rn or "RIGHT")
             if bid == first_id and nbouts > 1:
                 names += "  (warm-up)"
             score = "%d - %d" % (lf, rf) if lf is not None else "-"
-            mark = ("   [skipped]" if ytid == "skipped"
-                    else ("   [uploaded]" if ytid else ""))
+            mark = "   [saved]" if exported else ""
             out.append({"bout_id": bid, "title": names,
                         "sub": "%s   %d touches   final %s%s"
                                % (when, n, score, mark)})
@@ -1755,9 +1814,9 @@ def main():
                     lines = ["%d bouts, %d touches" % (nb, nt)]
                     # The one fact that prevents the expensive mistake.
                     if nu:
-                        lines.append("%d NOT YET UPLOADED" % nu)
+                        lines.append("%d NOT YET SAVED to the share" % nu)
                     else:
-                        lines.append("all uploaded or skipped")
+                        lines.append("all saved to the share")
                     lines.append("Video on disk: %.1f GB" % (vb / 1e9))
                     confirm = {
                         "title": "Delete ALL bouts?",
@@ -1766,6 +1825,25 @@ def main():
                                     ("+ VIDEO", ("do_delete_all", 1))],
                         "from": MODE_BOUTS}
                     mode = MODE_CONFIRM
+            elif action[0] == "ask_clear_exports":
+                n, b = exports_on_share()
+                if not n:
+                    flash = ("Share is already empty", now + 2)
+                else:
+                    confirm = {
+                        "title": "Clear the share?",
+                        "lines": ["%d file(s), %.1f GB" % (n, b / 1e9),
+                                  "Copy them to a computer FIRST -",
+                                  "this cannot be undone."],
+                        "choices": [("CLEAR", ("do_clear_exports",))],
+                        "from": MODE_BOUTS}
+                    mode = MODE_CONFIRM
+            elif action[0] == "do_clear_exports":
+                confirm = None
+                n = clear_exports()
+                bout_rows, bout_page = load_bouts(), 0
+                flash = ("Cleared %d file(s) from the share" % n, now + 4)
+                mode = MODE_BOUTS
             elif action[0] == "do_delete_all":
                 confirm = None
                 with_video = bool(action[1])
@@ -1878,19 +1956,19 @@ def main():
                        else uploadable_bouts_latest_day()[0])
                 if ids:
                     start_exports(ids, combine=True)
-                    flash = ("Preparing %d bout(s) as one video..." % len(ids),
+                    flash = ("Saving %d bout(s) as one video..." % len(ids),
                              now + 3)
                 else:
-                    flash = ("Nothing new to upload", now + 2)
+                    flash = ("Nothing new to save", now + 2)
             elif action[0] == "upload_one":
                 bid = action[1]
-                already = con.execute("SELECT youtube_id FROM bouts WHERE"
+                already = con.execute("SELECT export_name FROM bouts WHERE"
                                       " id=?", (bid,)).fetchone()
                 if already and already[0]:
-                    flash = ("Already uploaded", now + 2)
+                    flash = ("Already saved: %s" % already[0][:34], now + 3)
                 else:
                     start_exports([bid])
-                    flash = ("Preparing bout video...", now + 3)
+                    flash = ("Saving bout to the share...", now + 3)
             elif action[0] == "wifi_open":
                 wifi_page = 0
                 start_wifi_scan()
@@ -1917,9 +1995,7 @@ def main():
             elif action[0] == "wifi_ok":
                 flash = ("Connecting to %s..." % wifi_target, now + 45)
                 ok = wifi_connect(wifi_target, wifi_pw)
-                if ok and start_uploads():
-                    flash = ("Connected - uploading...", now + 5)
-                elif ok:
+                if ok:
                     flash = ("Connected to %s" % wifi_target, now + 4)
                 else:
                     flash = ("Wrong password or connection failed", now + 4)
@@ -1962,32 +2038,18 @@ def main():
             stop_playback(play)
             mode, play = MODE_LIVE, None
 
-        # export batch finished -> report, then route to wifi / youtube setup
+        # export batch finished -> say what landed on the share
         if export_job["finished"]:
             export_job["finished"] = False
-            msg = "Prepared %d video(s)" % export_job["ok"]
+            msg = "Saved %d video(s) to the share" % export_job["ok"]
             if export_job["fail"]:
                 msg += ", %d failed" % export_job["fail"]
-            if export_job["ok"] and not os.path.exists(TOKEN_PATH):
-                flash = (msg + " - YouTube not linked yet", now + 5)
-            elif export_job["ok"] and not internet_up():
-                flash = (msg + " - pick a wifi network", now + 4)
-                wifi_page = 0
-                start_wifi_scan()
-                mode = MODE_WIFI
-            elif export_job["ok"] and begin_upload_phase():
-                flash = (msg + " - uploading...", now + 4)
-            else:
-                flash = (msg, now + 4)
-
-        # upload batch finished
-        if upload_job["finished"]:
-            upload_job["finished"] = False
-            m = "Uploaded %d video(s)" % upload_job["ok"]
-            if upload_job["fail"]:
-                m += " - %d failed (%s)" % (upload_job["fail"],
-                                            upload_job["error"])
-            flash = (m, now + 8)
+            if export_job.get("error"):
+                msg += " - " + export_job["error"]
+            addr = share_address()
+            if export_job["ok"] and addr:
+                msg += "  ->  " + addr
+            flash = (msg, now + 8)
 
         # ---------- draw current mode ----------
         screen.fill((0, 0, 0))
@@ -2029,13 +2091,7 @@ def main():
             back = ("back_live",) if mode == MODE_BOUTS else ("back_bouts",)
             screen.blit(font_head.render(title, True, (235, 235, 245)), (108, 10))
             buttons.append(Button((4, 4, 96, 40), "BACK", back))
-            if upload_job["active"]:
-                screen.blit(font_sml.render(
-                    "Uploading %d/%d  %d%%" % (upload_job["done"] + 1,
-                                               upload_job["total"],
-                                               upload_job["pct"]),
-                    True, (140, 235, 150)), (540, 18))
-            elif export_job["active"]:
+            if export_job["active"]:
                 screen.blit(font_sml.render(
                     "Cutting %d/%d..." % (export_job["done"],
                                           export_job["total"]),
@@ -2043,20 +2099,22 @@ def main():
             elif mode == MODE_BOUTS:
                 # Disabled while recording: wiping the footage would pull files
                 # out from under the running encoder.
-                buttons.append(Button((296, 4, 126, 40), "DELETE ALL",
+                buttons.append(Button((250, 4, 122, 40), "DELETE ALL",
                                       ("ask_delete_all",),
                                       enabled=not rec.active))
-                buttons.append(Button((430, 4, 104, 40), "WIFI",
+                buttons.append(Button((378, 4, 76, 40), "WIFI",
                                       ("wifi_open",)))
-                buttons.append(Button((560, 4, 172, 40), "UPLOAD ALL",
+                buttons.append(Button((460, 4, 92, 40), "CLEAR",
+                                      ("ask_clear_exports",)))
+                buttons.append(Button((558, 4, 174, 40), "SAVE ALL",
                                       ("upload_all",)))
             else:
-                # Left of UPLOAD, same slot the WIFI button uses on the bouts
+                # Left of SAVE, same slot the WIFI button uses on the bouts
                 # screen. Both live in this branch, so neither is offered while
-                # an upload or export is running.
+                # an export is running.
                 buttons.append(Button((430, 4, 104, 40), "DELETE",
                                       ("ask_delete_bout", cur_bout["bout_id"])))
-                buttons.append(Button((560, 4, 172, 40), "UPLOAD",
+                buttons.append(Button((560, 4, 172, 40), "SAVE",
                                       ("upload_one", cur_bout["bout_id"])))
             y = 52
             for r in rows[page * ROWS_PER_PAGE:(page + 1) * ROWS_PER_PAGE]:
@@ -2174,8 +2232,12 @@ def main():
             buttons.append(Button((206, 426, 586, 48), "SPACE", ("key", " ")))
 
         elif mode == MODE_WIFI:
-            screen.blit(font_head.render("Wi-Fi networks", True,
-                                         (235, 235, 245)), (108, 10))
+            hdr = "Wi-Fi networks"
+            addr = share_address()
+            screen.blit(font_head.render(hdr, True, (235, 235, 245)), (108, 10))
+            if addr:
+                screen.blit(font_sml.render(addr, True, (150, 210, 255)),
+                            (108 + font_head.size(hdr)[0] + 14, 20))
             buttons.append(Button((4, 4, 96, 40), "BACK", ("wifi_cancel",)))
             buttons.append(Button((470, 4, 110, 40), "RESCAN",
                                   ("wifi_rescan",)))
