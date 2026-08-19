@@ -8,9 +8,6 @@ The project is three largely independent systems:
 1.  **Camera Tracking:** A servo-mounted camera follows the fencers by measuring the unspooling of the reels, using quadrature encoder rings read by optical sensors.
 2.  **Scoring Overlay:** Real-time lights, score, clock and hit timing taken from a **Skewered** scoring box over **Bluetooth LE**.
 3.  **Raspberry Pi Station:** A self-contained touchscreen box that renders the overlay, records the strip, indexes every touch, and plays back instant replays.
-
-A **QR registration** scanner and a legacy **OBS bridge** for Favero boxes are also included; see below.
-
 ---
 
 ## 🏗 System Architecture
@@ -48,14 +45,6 @@ The **Skewered** box advertises its complete state over Bluetooth LE, so the Pi 
 
 ### 3. Raspberry Pi Station
 A Raspberry Pi 5 with a 7" touchscreen and a USB webcam: live view with the overlay burned in, activity-triggered recording, a SQLite index of every touch, an on-screen bout browser with instant replay, and YouTube upload. Full detail in [`Raspberry_Pi_Station/README.md`](Raspberry_Pi_Station/README.md).
-
-### 4. QR Code Scanner
-For rapid fencer changes during tournaments. This module allows you to scan a fencer's info and update names/clubs instantly.
-
-* **Hardware:** Waveshare Round 2D Codes Scanner Module.
-* **Housing:** [3D Model for QR Reader](https://cad.onshape.com/documents/1d7ee73f291c58a099dbd764/w/b41d5c9f579bbfb616cc79d3/e/3b1fc9ae92bd20791cf18614).
-
----
 
 ## 💻 OBS Integration (legacy Favero route)
 
