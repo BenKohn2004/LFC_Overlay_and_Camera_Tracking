@@ -57,17 +57,6 @@ Before the Raspberry Pi station, the overlay was driven by OBS on a laptop. `Rec
 
 ---
 
-## 📐 Mathematics of Tracking
-The system calculates the midpoint between the two fencers to determine the servo angle. If the camera is placed at a distance $D$ from the center of the strip, and the fencers are at positions $L$ and $R$ relative to the reels:
-
-$$\text{Midpoint} = \frac{L + R}{2}$$
-
-The required servo angle $\theta$ is determined by:
-
-$$\theta = \arctan\left(\frac{\text{Midpoint}}{D}\right)$$
-
----
-
 ## ⚠️ Troubleshooting
 * **Inconsistent Counting:** Usually caused by the encoder ring coming loose from the reel drum. Ensure it is securely attached and the reel returns to "zero" when fully retracted.
 * **Environmental Light:** If the IR sensors struggle, try calibrating them in a dimmer environment to simulate the interior of the reel housing.
