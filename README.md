@@ -18,7 +18,8 @@ Two separate radios, doing two unrelated jobs:
 * **Camera tracking** uses **ESP8266 (Wemos D1 Mini)** boards talking **ESP-NOW** — the encoder board on the reel sends positions to the servo board on the camera.
 
 ### 1. Camera Tracking System
-The camera uses a quadrature encoder ring made of [Matte Black Vinyl Wrap]([Camera%20Tracking%20System/Favero%20Reel%20Encoder%20Tiled.pdf](https://www.amazon.com/dp/B07PYK74SG)) mounted on the reel drum to calculate fencer positions in real-time. The ring segments were printed out on [8 1/2 x 11 labels](https://www.amazon.com/Labelchoice-Shipping-Printers-Adhesive-Mailing/dp/B0B5RCBMW8) and adhered to the base of the reel drum.
+The concept is described in a Youtube video that shows how the quadrature encoding is implemented and the distances are calculated.
+The quadrature encoder ring made of [Matte Black Vinyl Wrap]([Camera%20Tracking%20System/Favero%20Reel%20Encoder%20Tiled.pdf](https://www.amazon.com/dp/B07PYK74SG)) mounted on the reel drum to calculate fencer positions in real-time. The ring segments were printed out on [8 1/2 x 11 labels](https://www.amazon.com/Labelchoice-Shipping-Printers-Adhesive-Mailing/dp/B0B5RCBMW8) and adhered to the base of the reel drum.
 
 * **Hardware:**
     * **Servo:** [DS3218 (270° Digital Servo)](https://www.aliexpress.us/item/3256807308983626.html).
