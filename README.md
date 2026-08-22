@@ -45,7 +45,7 @@ The **Skewered** box advertises its complete state over Bluetooth LE, so the Pi 
 > **Legacy path:** the earlier Wi-Fi route — an ESP8266 parsing the box's RS-485 output through a MAX485 and broadcasting UDP from its own SoftAP — is kept in [`Skewered/`](Skewered/) for reference, along with a Favero FA-05 parser in [`Scoring Machine Integration/`](Scoring%20Machine%20Integration/). Neither is needed for the BLE setup.
 
 ### 3. Raspberry Pi Station
-A Raspberry Pi 5 with a 7" touchscreen and a USB webcam: live view with the overlay burned in, activity-triggered recording, a SQLite index of every touch, an on-screen bout browser with instant replay, and YouTube upload. Full detail in [`Raspberry_Pi_Station/README.md`](Raspberry_Pi_Station/README.md).
+A Raspberry Pi 5 with a 7" touchscreen and a USB webcam: live view with the overlay burned in, activity-triggered recording, a SQLite index of every touch, an on-screen bout browser with instant replay, and one-tap copying of cut bouts onto a USB drive. Full detail in [`Raspberry_Pi_Station/README.md`](Raspberry_Pi_Station/README.md).
 
 ## 💻 OBS Integration (legacy Favero route)
 
