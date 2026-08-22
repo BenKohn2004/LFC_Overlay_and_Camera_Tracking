@@ -1,10 +1,15 @@
 # Raspberry Pi Fencing Station
 
 A self-contained recording and review station for a fencing strip, built on a
-Raspberry Pi 5 with a 7" touchscreen (800x480) and a USB webcam. It pairs with
-the Skewered UDP transmitter in [`../Skewered/`](../Skewered/)
-(`8266_Skewered_Parser_and_Transmitter_UDP.ino`), which broadcasts the scoring
-box state over Wi-Fi.
+Raspberry Pi 5 with a 7" touchscreen (800x480) and a USB webcam. It reads the
+scoring box directly over **Bluetooth LE** — the box advertises its whole state,
+so there is no data cable, no RS-485 converter and no transmitter board.
+`ble_bridge.py` decodes those advertisements and re-emits them on UDP 4210 for
+`station.py`.
+
+The earlier Wi-Fi route (an ESP8266 parsing the box's RS-485 output and
+broadcasting from its own access point) is kept in [`../Skewered/`](../Skewered/)
+for reference, but is not used.
 
 ## What it does
 
@@ -33,23 +38,25 @@ box state over Wi-Fi.
   "no club" and a US-flag option are always available, and typing filters the
   grid by club name. Picking a fencer name whose club is known applies the
   logo automatically.
-- **Transmitter health telemetry** — the companion sketch broadcasts a
-  1 Hz debug beacon (uptime, loop rate, serial byte counters, send failures,
-  free heap) on port 4211; `debug_logger.py` records it so radio problems can
-  be diagnosed after the fact.
-- **Save to a network share** — from the bout browser, `SAVE ALL` (or per-bout
+- **Hit timing from the box** — the state packet carries, per side, the
+  milliseconds since that fencer's hit. Touches are back-dated by it, so their
+  timestamps reflect when the hit happened rather than when the packet arrived,
+  and clip positions follow. A late hit shows its lateness on the overlay in a
+  purple box over that side's lamp, matching the number the scoring box shows.
+- **Save to a USB drive** — from the bout browser, `SAVE ALL` (or per-bout
   `SAVE`) cuts each bout (first touch to last, capped at 20 min, via stream
-  copy) and writes it to `~/skewered/exports`, which Samba publishes as
-  `\\<pi-ip>\exports`. Files are named `Name vs Name - date (score).mp4`, with
-  the touch list beside each one as a `.txt`. A per-bout `export_name` prevents
-  duplicates, so `SAVE ALL` only writes bouts that have not been saved yet.
-  `CLEAR` empties the share once the files have been copied off — nothing
-  deletes them automatically, because the Pi cannot know when that happened.
-  The station displays its own `\\ip\exports` address: the one thing needed to
-  fetch the videos, and the one nobody can guess.
+  copy) to `~/skewered/exports`, named `Name vs Name - date (score).mp4` with
+  the touch list beside it as a `.txt`. Plug in a USB drive and the `USB`
+  button lights up; tapping it copies everything across, flushes, and unmounts
+  so the drive can be pulled safely. A per-bout `export_name` prevents
+  duplicates, so `SAVE ALL` only writes bouts that have not been saved, and
+  copying twice skips files already on the drive. `CLEAR` empties the staging
+  folder once the files are away — nothing deletes them automatically, because
+  the Pi cannot know when they were copied.
 
-  Nothing on this box holds a cloud credential. Uploading is done by hand,
-  from a machine that is already logged in.
+  There is no network in this path at all: no address to find, no password, no
+  drivers, and nothing to configure on the computer receiving the files. That
+  is deliberate — it is the step a new user has to get through unaided.
 
 ## Files
 
@@ -63,7 +70,7 @@ box state over Wi-Fi.
 | `udp_listen.py`, `udp_watch.py` | Small debugging listeners for the telemetry |
 | `make_logos.py` | Turns club logo images into uniform 128x128 circles |
 | `ble_bridge.py` | Reads the box's BLE advertisements, re-emits them on UDP 4210 |
-| `setup_share.sh` | One-time Samba setup for the exports share |
+| `hit_capture.py` | Logs decoded BLE advertisements (in Troubleshooting_Tools) |
 | `assets/` | Overlay art (same images the OBS overlay uses) |
 
 **Club logos:** drop images into `~/skewered/logos_src/` on the Pi — the
@@ -102,20 +109,20 @@ Exit: ESC, or press-and-hold the live view for 2 seconds.
 Fencer names live in `~/skewered/fencers.txt` (line 1 = left, line 2 = right);
 the on-screen editor maintains it for you.
 
-## Sharing the videos (one-time)
+## Getting the videos off
 
-Run `bash setup_share.sh` on the Pi. It installs Samba, shares only
-`~/skewered/exports`, and prompts for the password Windows will ask for.
+Plug a USB drive into the Pi. The desktop automounts it, the `USB` button on
+the bouts screen becomes active, and tapping it copies every saved video and
+its `.txt` onto the drive under `Skewered/`, then unmounts it and says SAFE TO
+REMOVE. Nothing else is required, on the Pi or on the computer.
 
-Windows refuses guest SMB connections by default, so the share needs a
-password — it is local to Samba and unrelated to any online account. Only the
-exports folder is shared, so an accidental drag in Explorer cannot reach the
-recordings or the database.
-
-From Windows open `\\<pi-ip>\exports`, or map it to a drive letter. The `WIFI`
-button joins the Pi to a network so the share is reachable; at a venue with no
-usable Wi-Fi the Pi can host its own hotspot and the laptop joins that instead,
-which works the same way.
+Notes: the button is greyed out until a drive is mounted, which is the whole
+instruction. Files already on the drive are skipped, so copying twice is
+harmless. Each file is written to a `.part` name and renamed on completion, so
+a drive pulled mid-copy leaves an obvious partial rather than a truncated video
+that looks whole. FAT32 drives cannot hold a file of 4 GB or more — that only
+matters for a very long combined video, and the copy says so rather than
+failing silently.
 
 ## Diagnosing startup problems
 

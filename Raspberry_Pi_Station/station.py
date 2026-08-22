@@ -14,6 +14,7 @@ Exit: ESC anywhere, or press-and-hold 2 s on the LIVE screen.
 Flags: --force-record, --secs N.
 """
 import os
+import re
 import shutil
 import signal
 import socket
@@ -758,42 +759,115 @@ def clear_exports():
     return n
 
 
-def share_address():
-    """The UNC path to type into Windows Explorer, or None if not on a network.
+FAT32_MAX = 4 * 1024 ** 3 - 1   # the largest file a FAT32 stick can hold
 
-    Shown on screen because this is the one fact needed to fetch the videos and
-    the one nobody can guess -- and mDNS (`raspberrypi.local`) has not been
-    reliable here, so the literal address is what gets displayed.
+
+def usb_target():
+    """The mounted removable drive to copy onto, or None.
+
+    Reads the mount point from lsblk rather than guessing a path under /media.
+    The desktop automounter appends a digit when an old mount directory is
+    still lying around, so a stick labelled ESD-USB can appear as ESD-USB5 --
+    the label is not the directory name and must not be used to build a path.
     """
-    ip = None
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # No packet is sent; this just asks the routing table which local
-            # address would be used, which works with no internet present.
-            s.connect(("192.168.1.1", 9))
-            ip = s.getsockname()[0]
-        finally:
-            s.close()
-    except OSError:
-        pass
-    if not ip or ip.startswith("127."):
-        # No route to a gateway -- which is the normal case on a direct cable
-        # or a link-local link, where there is still a perfectly usable address
-        # to type into Explorer. Ask for the interface addresses directly.
-        ip = None
-        try:
-            out = subprocess.run(["hostname", "-I"], capture_output=True,
-                                 text=True, timeout=2).stdout
-            for cand in out.split():
-                if ":" not in cand and not cand.startswith("127."):
-                    ip = cand
-                    break
-        except (OSError, subprocess.SubprocessError):
-            pass
-    if not ip:
+        out = subprocess.run(
+            ["lsblk", "-Pno", "NAME,RM,TYPE,MOUNTPOINT,LABEL,FSTYPE"],
+            capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
         return None
-    return r"\\%s\exports" % ip
+    for line in out.splitlines():
+        f = dict(re.findall(r'(\w+)="([^"]*)"', line))
+        mp = f.get("MOUNTPOINT", "")
+        # RM=1 is the kernel's removable flag -- this is what keeps the SD card
+        # and its boot partition out of the running.
+        if (f.get("RM") == "1" and f.get("TYPE") == "part"
+                and mp.startswith(("/media/", "/mnt/"))):
+            try:
+                free = shutil.disk_usage(mp).free
+            except OSError:
+                continue
+            return {"mount": mp, "dev": "/dev/" + f.get("NAME", ""),
+                    "label": f.get("LABEL") or f.get("NAME", "USB"),
+                    "free": free, "fstype": f.get("FSTYPE", "")}
+    return None
+
+
+def usb_copy(target, on_progress=None):
+    """Copy everything on the share onto the stick.
+
+    Returns (copied, skipped, errors). Files already present at the same size
+    are skipped, so copying twice is harmless and a half-finished copy can be
+    repeated without duplicating work.
+    """
+    dest = os.path.join(target["mount"], "Skewered")
+    copied = skipped = 0
+    errors = []
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as e:
+        return 0, 0, [("", "cannot write to the drive: %s" % e)]
+
+    try:
+        names = sorted(f for f in os.listdir(EXPORT_DIR)
+                       if f.endswith((".mp4", ".txt")))
+    except OSError:
+        names = []
+
+    for i, name in enumerate(names):
+        src = os.path.join(EXPORT_DIR, name)
+        dst = os.path.join(dest, name)
+        if on_progress:
+            on_progress(i, len(names), name)
+        try:
+            size = os.path.getsize(src)
+        except OSError:
+            continue
+        if os.path.exists(dst) and os.path.getsize(dst) == size:
+            skipped += 1
+            continue
+        # FAT32 cannot hold a file of 4 GiB or more, and a long combined video
+        # can exceed that. Say so plainly rather than failing mid-copy.
+        if target["fstype"] == "vfat" and size > FAT32_MAX:
+            errors.append((name, "too big for FAT32 (%.1f GB)" % (size / 1e9)))
+            continue
+        if size > shutil.disk_usage(target["mount"]).free:
+            errors.append((name, "not enough space on the drive"))
+            continue
+        try:
+            # Copy to a temporary name first: a stick pulled mid-write then
+            # leaves an obvious .part file rather than a truncated video that
+            # looks complete.
+            tmp = dst + ".part"
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+            copied += 1
+        except OSError as e:
+            errors.append((name, str(e)[:40]))
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return copied, skipped, errors
+
+
+def usb_eject(target):
+    """Flush and unmount, so the stick can be pulled safely.
+
+    Without this the copy may still be sitting in the kernel's write cache --
+    the files look written, the drive light is off, and yanking it truncates
+    them anyway.
+    """
+    try:
+        subprocess.run(["sync"], timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        r = subprocess.run(["udisksctl", "unmount", "-b", target["dev"]],
+                           capture_output=True, text=True, timeout=30)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def clip_duration(path):
@@ -1213,6 +1287,47 @@ def main():
     wifi_scan_busy = [False]
     export_job = {"active": False, "done": 0, "total": 0, "ok": 0,
                   "fail": 0, "finished": False}
+
+    usb_job = {"active": False, "done": 0, "total": 0, "copied": 0,
+               "skipped": 0, "finished": False, "errors": [], "label": "",
+               "ejected": False, "current": ""}
+
+    # usb_target() shells out to lsblk, and the button below is rebuilt every
+    # frame -- at 30 fps that is 30 process spawns a second competing with the
+    # capture loop. Two seconds is far quicker than anyone plugs in a drive.
+    usb_cache = {"at": 0.0, "target": None}
+
+    def usb_present():
+        if time.time() - usb_cache["at"] > 2.0:
+            usb_cache["target"] = usb_target()
+            usb_cache["at"] = time.time()
+        return usb_cache["target"]
+
+    def start_usb_copy():
+        """Copy the saved videos onto a plugged-in drive, then unmount it."""
+        if usb_job["active"]:
+            return False
+        target = usb_target()
+        if not target:
+            return False
+        usb_job.update(active=True, done=0, total=0, copied=0, skipped=0,
+                       finished=False, errors=[], label=target["label"],
+                       ejected=False, current="")
+
+        def worker():
+            def prog(i, n, name):
+                usb_job["done"], usb_job["total"] = i, n
+                usb_job["current"] = name
+            copied, skipped, errors = usb_copy(target, prog)
+            usb_job["copied"], usb_job["skipped"] = copied, skipped
+            usb_job["errors"] = errors
+            # Always unmount, even if some files failed: whatever did copy is
+            # only safe on the drive once the cache is flushed.
+            usb_job["ejected"] = usb_eject(target)
+            usb_job["active"] = False
+            usb_job["finished"] = True
+        threading.Thread(target=worker, daemon=True).start()
+        return True
 
     def start_exports(bout_ids, combine=False):
         """Cut the bouts and put the result on the share.
@@ -1834,6 +1949,14 @@ def main():
                                     ("+ VIDEO", ("do_delete_all", 1))],
                         "from": MODE_BOUTS}
                     mode = MODE_CONFIRM
+            elif action[0] == "usb_copy":
+                n, _b = exports_on_share()
+                if not n:
+                    flash = ("Nothing saved yet - use SAVE first", now + 3)
+                elif not usb_target():   # live check, not the cache
+                    flash = ("No USB drive found - plug one in", now + 3)
+                elif start_usb_copy():
+                    flash = ("Copying to USB...", now + 4)
             elif action[0] == "ask_clear_exports":
                 n, b = exports_on_share()
                 if not n:
@@ -2050,15 +2173,28 @@ def main():
         # export batch finished -> say what landed on the share
         if export_job["finished"]:
             export_job["finished"] = False
-            msg = "Saved %d video(s) to the share" % export_job["ok"]
+            msg = "Saved %d video(s)" % export_job["ok"]
             if export_job["fail"]:
                 msg += ", %d failed" % export_job["fail"]
             if export_job.get("error"):
                 msg += " - " + export_job["error"]
-            addr = share_address()
-            if export_job["ok"] and addr:
-                msg += "  ->  " + addr
+            if export_job["ok"]:
+                t = usb_target()
+                msg += ("  -  tap USB to copy to %s" % t["label"] if t
+                        else "  -  plug in a USB drive to copy them off")
             flash = (msg, now + 8)
+
+        # usb copy finished -> report, and say whether it is safe to pull out
+        if usb_job["finished"]:
+            usb_job["finished"] = False
+            m = "Copied %d file(s) to %s" % (usb_job["copied"], usb_job["label"])
+            if usb_job["skipped"]:
+                m += ", %d already there" % usb_job["skipped"]
+            if usb_job["errors"]:
+                m += " - %d failed (%s)" % (len(usb_job["errors"]),
+                                            usb_job["errors"][0][1])
+            m += ".  SAFE TO REMOVE" if usb_job["ejected"] else                  ".  Wait before removing - could not eject"
+            flash = (m, now + 12)
 
         # ---------- draw current mode ----------
         screen.fill((0, 0, 0))
@@ -2100,7 +2236,12 @@ def main():
             back = ("back_live",) if mode == MODE_BOUTS else ("back_bouts",)
             screen.blit(font_head.render(title, True, (235, 235, 245)), (108, 10))
             buttons.append(Button((4, 4, 96, 40), "BACK", back))
-            if export_job["active"]:
+            if usb_job["active"]:
+                screen.blit(font_sml.render(
+                    "Copying to USB %d/%d..." % (usb_job["done"] + 1,
+                                                 max(1, usb_job["total"])),
+                    True, (140, 235, 150)), (520, 18))
+            elif export_job["active"]:
                 screen.blit(font_sml.render(
                     "Cutting %d/%d..." % (export_job["done"],
                                           export_job["total"]),
@@ -2108,14 +2249,22 @@ def main():
             elif mode == MODE_BOUTS:
                 # Disabled while recording: wiping the footage would pull files
                 # out from under the running encoder.
-                buttons.append(Button((250, 4, 122, 40), "DELETE ALL",
+                # USB is the way videos leave this box, so it sits next to
+                # SAVE and is greyed out until a drive is actually mounted --
+                # that greying is the whole instruction for a new user.
+                usb_now = usb_present()
+                buttons.append(Button((244, 4, 108, 40), "DEL ALL",
                                       ("ask_delete_all",),
                                       enabled=not rec.active))
-                buttons.append(Button((378, 4, 76, 40), "WIFI",
+                buttons.append(Button((358, 4, 70, 40), "WIFI",
                                       ("wifi_open",)))
-                buttons.append(Button((460, 4, 92, 40), "CLEAR",
+                buttons.append(Button((434, 4, 84, 40), "CLEAR",
                                       ("ask_clear_exports",)))
-                buttons.append(Button((558, 4, 174, 40), "SAVE ALL",
+                buttons.append(Button((524, 4, 76, 40), "USB",
+                                      ("usb_copy",),
+                                      enabled=bool(usb_now) and
+                                      not usb_job["active"]))
+                buttons.append(Button((606, 4, 126, 40), "SAVE ALL",
                                       ("upload_all",)))
             else:
                 # Left of SAVE, same slot the WIFI button uses on the bouts
@@ -2241,12 +2390,8 @@ def main():
             buttons.append(Button((206, 426, 586, 48), "SPACE", ("key", " ")))
 
         elif mode == MODE_WIFI:
-            hdr = "Wi-Fi networks"
-            addr = share_address()
-            screen.blit(font_head.render(hdr, True, (235, 235, 245)), (108, 10))
-            if addr:
-                screen.blit(font_sml.render(addr, True, (150, 210, 255)),
-                            (108 + font_head.size(hdr)[0] + 14, 20))
+            screen.blit(font_head.render("Wi-Fi networks", True,
+                                         (235, 235, 245)), (108, 10))
             buttons.append(Button((4, 4, 96, 40), "BACK", ("wifi_cancel",)))
             buttons.append(Button((470, 4, 110, 40), "RESCAN",
                                   ("wifi_rescan",)))
