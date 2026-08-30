@@ -55,7 +55,7 @@ An automated video refereeing, recording, and camera tracking system designed fo
 
 ## Part 2: Video Recording, Overlay & Replay Station
 
-The recording station relies heavily on the real-time match data over Bluetooth Low Energy (BLE) from a **Skewered Fencing** scoring machine thanks to the excellent work by [Augusto Roman / Skewered Fencing](https://github.com/skewered-fencing).
+The recording station is reasonably straightforward and relies heavily on the excellent work done by [Augusto Roman](https://github.com/skewered-fencing) in putting together his Skewered Fencing scoring box. The Skewered Fencing Box broadcasts the fencing data via Bluetooth (BLE) and the data is then used by the Raspberry Pi to create the fencing overlay.
 
 ### 1. Hardware Setup
 * **SBC:** [Raspberry Pi 5 with Active Cooler](https://www.amazon.com/RasTech-Raspberry-Active-Cooler-Readers/dp/B0D2WYFS23/ref=sr_1_1)
