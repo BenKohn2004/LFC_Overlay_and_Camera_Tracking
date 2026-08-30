@@ -1,74 +1,50 @@
-# LFC Overlay & Camera Tracking System
+This project is a recording and camera tracking solution. It is two independent systems. The first part uses two quadrature encoders built into the Favero reels and the second is a Raspberry Pi that uses the Bluetooth (BLE) from a Skewered Fencing machine to create an overlay for fencing recording.
 
-An automated video refereeing, recording, and camera tracking system designed for fencing strips. The project consists of two independent subsystems:
+Camera Tracking
 
-1. **Camera Tracking Subsystem:** Measures fencer positions using optical quadrature encoders built into Favero reels and wirelessly controls a motorized camera servo via ESP-NOW to keep fencers centered in frame.
-2. **Video Recording & Overlay Subsystem:** A Raspberry Pi station that intercepts Bluetooth Low Energy (BLE) packets from a [Skewered Fencing machine](https://github.com/skewered-fencing) to burn match scores, lights, and timing onto webcam footage and manage clip export.
+Reel Hardware
 
----
+An explanation of how the quadrature encoding works can be found in this Youtube Video.
 
-## System Architecture
+The tracking system uses quadrature encoding, a series of four black matte vinyl wrap  ⅛ circle segments that are adhered to the bottom of the drum of the Favero reel. The other four ⅛ circle segments are left blank since the aluminum is reflective enough on its own.
 
-| Subsystem | Core Hardware | Communication | Primary Function |
-|---|---|---|---|
-| **Reel Sensors (x2)** | Wemos D1 Mini (ESP8266), TCRT5000 IR Sensors (x2), 0.96" OLED | **ESP-NOW** | Encodes drum rotation and broadcasts unspool position. |
-| **Camera Servo Unit** | Wemos D1 Mini (ESP8266), DS3218 270° Servo | **ESP-NOW** | Receives positions from both reels and pans camera to midpoint. |
-| **Video & Overlay Station** | Raspberry Pi 5, 7" Touchscreen, USB Camera | **BLE (Bluetooth LE)** | Intercepts scoring state, generates overlay, indexes touches, and exports clips. |
+Two TCRT5000 Infrared Sensors are placed 32 mm apart from each other and held in place by a 3D printed holder. They are connected via a PCB using the Gerber File and the schematic. These sensors are powered by and relay data back to the circuit board attached to the same Gerber File as above. The main components for the board are a Wemos D1 Mini and a 0.96 inch OLED screen along with a few 10k Ω resistors, 0.1 and 100 μF capacitors, pushbuttons and connectors. For the 0.96 inch OLED, ensure that the VCC and GND are in the correct order and match the PCB. There seems to be two styles and one of them has the two pins flipped. The system also uses an 18650 Battery, a TP4056 charging module, a battery holder and a power switch. This is enclosed in a 3D printed holder that is meant to be screwed into the back of the Favero reel using a tapped, threaded connection to hold 8 mm M3 screws. The power switch is designed so that it can either charge the battery or power circuit board. To directly power the circuit board, use the USB on the Wemos to power the system.
 
----
+The Servo used is a DS3218 and sits atop a tripod and holds the manually operated USB camera. The D1 Wemos that controls the camera is not mounted on a PCB
 
-## 📹 Part 1: Camera Tracking System
+Reel Coding
 
-### 1. Optical Encoder Hardware (Per Reel)
-* **Quadrature Encoding Principle:** See this [YouTube Video Explanation](https://youtu.be/cfHPRQ0f3-o).
-* **Pattern:** Four $\frac{1}{8}$-circle segments of [matte black vinyl wrap](https://www.amazon.com/dp/B07PYK74SG) are adhered to the bottom of the Favero reel drum, alternating with four exposed reflective aluminum sections.
-* **Sensors:** Two TCRT5000 IR reflective sensors placed **32 mm apart**, housed in a [3D Printed Sensor Holder](https://cad.onshape.com/documents/fab3dbb0c6cd24d122a26ac7/w/167803772a56f7a36cd09560/e/40a31ee80700d67aef5da61b?renderMode=0&uiState=6a9347b5703c2e93da4af6cf).
+The code for the Wemos can be found above. The Left or Right reel is determined by the line:
 
-### 2. Electronics & PCB
-* **Fabrication Files:** [Gerber Files](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Camera%20Tracking%20System/Gerber_Favero_Optical_Encoder_PCB_Favero_Optical_Encoder_2_2026-08-18.zip) & [Circuit Schematic](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Camera%20Tracking%20System/Schematic_Favero_Optical_Encoder_2026-08-30.pdf).
-* **Bill of Materials (BOM):**
-  * **Microcontroller:** [Wemos D1 Mini (ESP8266)](https://www.amazon.com/NodeMcu-Internet-Development-ESP8266-Compatible/dp/B0BHW1CNCM/ref=sr_1_3)
-  * **Display:** [0.96" I2C OLED Screen](https://www.amazon.com/iPistBit-Display-Luminous-Compatible-Raspberry/dp/B0D2NPB4BM/) *(⚠️ Note: Verify OLED pinout order; some modules swap `VCC` and `GND`)*
-  * **Power System:** 18650 Li-ion cell, [18650 Battery Holder](https://www.temu.com/10pcs-5pcs-18650-power-bank-cases-1x-3-6v-4-2v-18650-battery-holder-storage-box-case-1-slot-battery-container-with-wire-lead-g-601099751570278.html), [TP4056 USB-C Charging Module](https://www.temu.com/12pcs--lithium-battery-charging-module-with-micro-usb-type-c-ports-protection-board-18650-charging-board-protection-module-g-606096320255275.html), and [Mini SPDT Toggle Switch](https://www.temu.com/30pcs--mini-toggle-switches-mini--toggle-switches-compact-high-knob-design-for--on---boards-g-601100638881014.html)
-  * **Passives & Hardware:** 10kΩ resistors, 0.1 µF & 100 µF capacitors, [pushbuttons](https://www.amazon.com/dp/B00R17XUFC), [screw terminals](https://www.amazon.com/Molence-Terminal-Connector-Terminals-26-18AWG/dp/B09F6TC7RP/), and [M3 × 8 mm screws](https://www.temu.com/uadkl-347pcs--hex-socket-button-head-screws-nuts-assortment-kit-round--set-5-20mm-metric-machine-screws-with-storage-box-for-electronics-furniture-hardware-repair-g-607178903681949.html)
-* **Enclosure:** [3D Printed Electronics Case](https://cad.onshape.com/documents/7d9532982665e26a0dfa1674/w/e8c4ee4c5a7db918b2149cef/e/8ab91a05bc2fb4744dda546d?renderMode=0&uiState=6a934cc2d62aea1f596a2f0e) mounted directly to the back of the Favero reel via tapped M3 threads.
-* **Power Note:** The power switch toggles between charging the battery and powering the circuit board. To power the board directly during testing, connect via the Wemos USB port.
+outgoingData.senderID = 1; //1 For Left and 2 for Right
 
-### 3. Camera Servo Hardware
-* **Servo:** [DS3218 270° Digital Servo](https://www.amazon.com/dp/B07HNTKSZT) mounted atop a standard tripod.
-* **Optics:** [Manual Zoom/Focus CS-mount USB Camera](https://www.aliexpress.us/item/3256805987213806.html).
-* **Controller:** Standalone Wemos D1 Mini wired to the servo PWM signal (no custom PCB required).
+Update the line with a 2, for the Right Reel. The distance from the reel to the camera is assumed to be about 250. The units are arbitrary but are displayed on the OLED when the reel is extended. You can either work with the assumption, set it every time that you power up the reel or hardcode in a better value by changing the line of code:
 
-### 4. Firmware Configuration
-* **Reel Encoder Firmware:** [`Wemos_Reel_Encoder.ino`](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Camera%20Tracking%20System/Wemos_Reel_Encoder.ino)
-  * Set reel side assignment:
-    ```cpp
-    outgoingData.senderID = 1; // 1 for Left Reel, 2 for Right Reel
-    ```
-  * Adjust strip geometry / camera distance:
-    ```cpp
-    int hypotenuse = 250; // Distance calibration units displayed on OLED
-    ```
-* **Camera Servo Firmware:** [`Wemos_Camera_Servo Rev 1.ino`](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Camera%20Tracking%20System/Wemos_Camera_Servo%20Rev%201.ino)
+int hypotenuse = 250;
 
----
+The coding for the Servo Camera can be found here.
 
-## Part 2: Video Recording, Overlay & Replay Station
+Video Recording and Replay
 
-The recording station is reasonably straightforward and relies heavily on the excellent work done by [Augusto Roman](https://github.com/skewered-fencing) in putting together his Skewered Fencing scoring box. The Skewered Fencing Box broadcasts the fencing data via Bluetooth (BLE) and the data is then used by the Raspberry Pi to create the fencing overlay.
+The video recording system is relatively straightforward and relies heavily on the work done already by Augusto Roman. The Skewered Fencing box transmits its data using Bluetooth (BLE). The Raspberry Pi receives the BLE and then displays the data as an overlay on the video from the webcam that is plugged into the Raspberry Pi. The Raspberry Pi uses a display screen and is powered by a battery bank.
 
-### 1. Hardware Setup
-* **SBC:** [Raspberry Pi 5 with Active Cooler](https://www.amazon.com/RasTech-Raspberry-Active-Cooler-Readers/dp/B0D2WYFS23/ref=sr_1_1)
-* **Screen:** [7" Touchscreen Display](https://www.amazon.com/dp/B0D3QB7X4Z)
-* **Power:** [USB-PD Battery Bank](https://www.amazon.com/dp/B0BJQ7F16T)
+The Raspberry Pi records the videos automatically once there is a change in the data, such as a scoring light and continues on for 5 minutes after the last light was on. It also automatically starts a new bout when the score is set to 0 - 0. The names and team logos can be adjusted and bouts are taken off the Raspberry Pi using a USB stick. The clips are saved and then exported. 
 
-### 2. Software & Automation Behavior
-* **Automatic Recording Trigger:** Automatically initiates clip capture upon detecting a scoring event (lights/score change) and continues recording for **5 minutes** after the last activity.
-* **Auto Bout Reset:** Automatically splits matches into new bout sessions whenever the score is reset to `0 - 0`.
-* **Touch Indexing & Timestamping:** Continuously records footage while indexing exact touch timestamps into an SQLite database.
-* **Exporting Options:**
-  * **Export All Bouts:** Generates trimmed highlight video files containing only the action surrounding each touch.
-  * **Export Specific Bout:** Exports the full uninterrupted recording of the selected bout.
-  * Footage can be exported directly to an attached USB flash drive via the touchscreen UI.
-* **Customization:** Fencer names and club/team logos can be updated on the fly directly through the interface.
-* **Streaming Note:** The system is optimized for local recording and video review; however, the pipeline can be adapted for live streaming (e.g., OBS / RTMP) if desired.
+The recording works by continuously recording and then saving the time stamps. If all the bouts are exported then only the clips of touches are saved. If a specific bout is exported it will show the entire bout, not solely the touches.
+
+It is not designed for livestreaming, though it could be modified to do so without too much trouble.
+
+The Raspberry Pi is set up in a way that I find convenient and it is meant so that anyone who uses it, can modify the code to suit their needs.
+
+Future Considerations:
+
+The code is meant to be easily adapted and there is little expectation that everyone will keep the code standard. It is designed to be adapted to the user. A few of the ideas that I may implement later. 
+
+Livestreaming or uploading directly from the Raspberry Pi. It is very much possible to directly upload from the Pi to a Youtube channel, even livestreaming is feasible. My biggest hesitancy for this is the numerous high level fencing tournaments with poor quality streams. I don’t want to have to rely on the local wifi and feel that recording with a later upload would yield a better product. And very few people particularly care if the fencing bout is live or a few hours old. Most of the live data is consumed by friend or parents and that comes from the FencingTimeLive results.
+
+Adding favorites or clips to review. A simple feature that uses something like cycling through “match count” or some other little used button on the remote, or even adding a second to the score clock, this could be a signal to the Raspberry Pi to tag that specific clip for a “Favorites” or quick look up feature and then be de-tagged later.
+The skewered fencing machine also has blade contact and a waterfall display. There might be a clever way to display this info on the fencing overlay.
+
+Subtle danger music that plays when a bout is 4-4, or 14-14, maybe victory music when the final point is awarded. Could also tie it to a button. 
+
+Audio, currently there really isn’t any audio tied into the Raspberry Pi. There really isn’t any particular reason why other than I have not done it yet.
