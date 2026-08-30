@@ -1,3 +1,5 @@
+# **[LFC_Overlay_and_Camera_Tracking](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking)**
+
 This project is a recording and camera tracking solution. It is two independent systems. The first part uses two quadrature encoders built into the Favero reels and the second is a Raspberry Pi that uses the Bluetooth (BLE) from a [Skewered Fencing](https://github.com/skewered-fencing) machine to create an overlay for fencing recording.
 
 **Camera Tracking**
@@ -16,5 +18,40 @@ The Servo used is a [DS3218](https://www.amazon.com/dp/B07HNTKSZT) and sits atop
 
 The code for the Wemos can be [found above](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Camera%20Tracking%20System/Wemos_Reel_Encoder.ino). The Left or Right reel is determined by the line:
 
-```cpp
-outgoingData.senderID = 1; // 1 For Left and 2 for Right
+`outgoingData.senderID = 1; // 1 For Left and 2 for Right`
+
+Update the line with a 2, for the Right Reel. The distance from the reel to the camera is assumed to be about 250. The units are arbitrary but are displayed on the OLED when the reel is extended. You can either work with the assumption, set it every time that you power up the reel or hardcode in a better value by changing the line of code:
+
+`int hypotenuse = 250;`
+
+The coding for the Servo Camera can be found [here](https://github.com/BenKohn2004/LFC_Overlay_and_Camera_Tracking/blob/main/Camera%20Tracking%20System/Wemos_Camera_Servo%20Rev%201.ino).
+
+**Video Recording and Replay**
+
+The video recording system is relatively straightforward and relies heavily on the work done already by [Augusto Roman](https://github.com/skewered-fencing). The Skewered Fencing box transmits its data using Bluetooth (BLE). The [Raspberry Pi](https://www.amazon.com/RasTech-Raspberry-Active-Cooler-Readers/dp/B0D2WYFS23/ref=sr_1_1) receives the BLE and then displays the data as an overlay on the video from the webcam that is plugged into the Raspberry Pi. The Raspberry Pi uses a [display screen](https://www.amazon.com/dp/B0D3QB7X4Z) and is powered by a [battery bank](https://www.amazon.com/dp/B0BJQ7F16T).
+
+The Raspberry Pi records the videos automatically once there is a change in the data, such as a scoring light and continues on for 5 minutes after the last light was on. It also automatically starts a new bout when the score is set to 0 - 0. The names and team logos can be adjusted and bouts are taken off the Raspberry Pi using a USB stick. The clips are saved and then exported.
+
+The recording works by continuously recording and then saving the time stamps. If all the bouts are exported then only the clips of touches are saved. If a specific bout is exported it will show the entire bout, not solely the touches.
+
+It is not designed for livestreaming, though it could be modified to do so without too much trouble.
+
+The Raspberry Pi is set up in a way that I find convenient and it is meant so that anyone who uses it, can modify the code to suit their needs.
+
+**Future Considerations**
+
+The code is meant to be easily adapted and there is little expectation that everyone will keep the code standard. It is designed to be adapted to the user. A few of the ideas that I may implement later:
+
+**Livestreaming or Direct Uploading**  
+Livestreaming or uploading directly from the Raspberry Pi. It is very much possible to directly upload from the Pi to a YouTube channel; even livestreaming is feasible. My biggest hesitancy for this is the numerous high level fencing tournaments with poor quality streams. I don’t want to have to rely on the local Wi-Fi and feel that recording with a later upload would yield a better product. And very few people particularly care if the fencing bout is live or a few hours old. Most of the live data is consumed by friends or parents and that comes from the [Fencing Time Live](https://www.fencingtimelive.com/) results.
+
+**Favorites and Clip Review Tagging**  
+Adding favorites or clips to review. A simple feature that uses something like cycling through “match count” or some other little-used button on the remote, or even adding a second to the score clock; this could be a signal to the Raspberry Pi to tag that specific clip for a “Favorites” or quick look-up feature and then be de-tagged later.
+
+**Blade Contact and Waterfall Display**  
+The Skewered Fencing machine also has blade contact and a waterfall display. There might be a clever way to display this info on the fencing overlay.
+
+**Audio and Sound Effects**  
+Subtle danger music that plays when a bout is 4-4 or 14-14, and maybe victory music when the final point is awarded. Could also tie it to a button.
+
+Audio: currently there really isn’t any audio tied into the Raspberry Pi. There really isn’t any particular reason why other than I have not done it yet.
