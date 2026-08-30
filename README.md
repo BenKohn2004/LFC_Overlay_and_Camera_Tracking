@@ -55,7 +55,7 @@ An automated video refereeing, recording, and camera tracking system designed fo
 
 ## Part 2: Video Recording, Overlay & Replay Station
 
-The recording station receives real-time match data over Bluetooth Low Energy (BLE) from a **Skewered Fencing** scoring apparatus (credit to [Augusto Roman / Skewered Fencing](https://github.com/skewered-fencing)).
+The recording station relies heavily on the real-time match data over Bluetooth Low Energy (BLE) from a **Skewered Fencing** scoring machine thanks to the excellent work by [Augusto Roman / Skewered Fencing](https://github.com/skewered-fencing).
 
 ### 1. Hardware Setup
 * **SBC:** [Raspberry Pi 5 with Active Cooler](https://www.amazon.com/RasTech-Raspberry-Active-Cooler-Readers/dp/B0D2WYFS23/ref=sr_1_1)
