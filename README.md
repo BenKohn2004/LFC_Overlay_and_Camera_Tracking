@@ -30,7 +30,7 @@ The code for the Camera Servo unit can be found in [`Wemos_Camera_Servo Rev 1.in
 
 **Video Recording and Replay**
 
-The video recording system is relatively straightforward and builds on the open-source groundwork by [Augusto Roman](https://github.com/skewered-fencing). The Skewered Fencing box broadcasts match data over BLE. The [Raspberry Pi](https://www.amazon.com/RasTech-Raspberry-Active-Cooler-Readers/dp/B0D2WYFS23/ref=sr_1_1) picks up the BLE signal and renders the data as a live overlay onto video captured from the plugged-in USB webcam. The Raspberry Pi uses a [touchscreen display](https://www.amazon.com/dp/B0D3QB7X4Z) and is powered by a portable [USB battery bank](https://www.amazon.com/dp/B0BJQ7F16T).
+The video recording system is relatively straightforward and builds on the excellent work done by [Augusto Roman](https://github.com/skewered-fencing) in developing and sharing the Skewered Fencing box. The Skewered Fencing box broadcasts match data over BLE. The [Raspberry Pi](https://www.amazon.com/RasTech-Raspberry-Active-Cooler-Readers/dp/B0D2WYFS23/ref=sr_1_1) picks up the BLE signal and renders the data as a live overlay onto video captured from the plugged-in USB webcam. The Raspberry Pi uses a [touchscreen display](https://www.amazon.com/dp/B0D3QB7X4Z) and is powered by a portable [USB battery bank](https://www.amazon.com/dp/B0BJQ7F16T).
 
 The Raspberry Pi triggers recordings automatically whenever scoring data changes (such as a light going off) and keeps recording for 5 minutes after the last light. It also automatically splits into a new bout whenever the score resets to 0 - 0. Fencer names and team logos are customizable, and bouts can be copied off the Pi using a USB flash drive.
 
