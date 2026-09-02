@@ -16,7 +16,7 @@ The system also uses an [18650 battery](https://www.temu.com/18650-rechargeable-
 
 The servo is a [DS3218](https://www.amazon.com/dp/B07HNTKSZT) that sits atop a tripod and pans the [manual-focus USB camera](https://www.aliexpress.us/item/3256805987213806.html). The Wemos D1 Mini controlling the camera servo is wired directly without a PCB.
 
-[Favero Reel Tracker PCB](Favero Reel Tracker PCB.jpg)
+![Favero Reel Tracker PCB](Favero%20Reel%20Tracker%20PCB.jpg)
 
 **Reel Coding**
 
