@@ -53,7 +53,7 @@ The Raspberry Pi setup is tailored to what I find convenient, but the code is ke
 The project is meant to be easily adaptable, and there is no expectation that everyone will keep the code completely standard. A few ideas I may explore later on:
 
 **Livestreaming or Direct Uploading**  
-Directly uploading from the Pi to YouTube or even running a live stream is entirely feasible. My main hesitation is that many tournament venues have poor, unreliable Wi-Fi. Recording locally and uploading later often yields much better video quality anyway, and few people mind if footage goes up a few hours later—most real-time updates are followed by parents and friends via [Fencing Time Live](https://www.fencingtimelive.com/).
+Directly uploading from the Pi to YouTube or even running a live stream is entirely feasible. My main hesitation is that many tournament venues have poor, unreliable Wi-Fi. Recording locally and uploading later often yields much better video quality anyway, and few people mind if footage goes up a few hours later.
 
 **Favorites and Clip Review Tagging**  
 Adding a quick bookmarking or favorites feature. Cycling through the "match count" or another rarely used remote button—or even briefly bumping a second onto the clock—could signal the Pi to tag that touch clip for instant review.
