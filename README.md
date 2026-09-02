@@ -6,7 +6,7 @@ This project is a recording and camera tracking solution consisting of two indep
 
 **Reel Hardware**
 
-An explanation of how the quadrature encoding works can be found in this [YouTube Video](https://youtu.be/cfHPRQ0f3-o).
+An explanation of how the quadrature encoding works can be found in this [YouTube Video](https://youtu.be/cfHPRQ0f3-o) and an example of the result can be seen [here](https://youtu.be/vwvP2WLjDpE?t=64).
 
 The tracking system uses quadrature encoding via a series of four [black matte vinyl wrap](https://www.amazon.com/dp/B07PYK74SG) ⅛-circle segments adhered to the bottom of the Favero reel drum. The other four ⅛-circle segments are left blank, as the bare aluminum is reflective enough on its own.
 
