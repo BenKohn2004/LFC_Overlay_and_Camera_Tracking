@@ -2,6 +2,8 @@
 
 This project is a recording and camera tracking solution consisting of two independent systems. The first part uses two quadrature encoders built into the Favero reels, and the second is a Raspberry Pi that receives Bluetooth Low Energy (BLE) data from a [Skewered Fencing](https://github.com/skewered-fencing) machine to create a scoring overlay for fencing match recordings.
 
+![Overlay_Screenshot_Example](Overlay_Screenshot_Example.jpg)
+
 **Camera Tracking**
 
 **Reel Hardware**
